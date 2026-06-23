@@ -140,6 +140,25 @@ app.post("/register", authenticate, async (req, res) => {
     return res.status(400).json({ error: "chatId gerekli" });
   }
 
+  // Telegram'a test mesajı at
+  try {
+    const testUrl = `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`;
+    const params = new URLSearchParams({
+      chat_id: chatId,
+      text: "KeepTime bildirimleri aktifleştirildi! ✓",
+    });
+
+    const telegramRes = await fetch(testUrl + "?" + params.toString());
+    const telegramData = await telegramRes.json();
+
+    if (!telegramData.ok) {
+      return res.status(400).json({ error: "Geçersiz Chat ID" });
+    }
+  } catch {
+    return res.status(500).json({ error: "Telegram doğrulaması başarısız" });
+  }
+
+  // Doğrulama başarılı — kaydet
   await supabase
     .from("users")
     .update({ telegram_chat_id: chatId })
