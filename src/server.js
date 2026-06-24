@@ -75,7 +75,7 @@ app.post("/auth/refresh", (req, res) => {
 
 // Kullanıcı oluştur
 app.post("/users/create", authenticate, authorize("superadmin", "manager"), async (req, res) => {
-  const { username, pin, role } = req.body;
+  const { username, pin, role, workspace_id } = req.body;
 
   if (!username || !pin || !role) {
     return res.status(400).json({ error: "Eksik parametre" });
@@ -86,11 +86,16 @@ app.post("/users/create", authenticate, authorize("superadmin", "manager"), asyn
     return res.status(403).json({ error: "Manager sadece worker oluşturabilir" });
   }
 
+  // Workspace ID — manager kendi workspace'ini kullanır, superadmin istediğini seçer
+  const assignedWorkspaceId = req.user.role === "superadmin"
+    ? (workspace_id || null)
+    : req.user.workspace_id;
+
   const pin_hash = await hashPin(pin);
 
   const { data, error } = await supabase
     .from("users")
-    .insert({ username, pin_hash, role, workspace_id: req.user.workspace_id })
+    .insert({ username, pin_hash, role, workspace_id: assignedWorkspaceId })
     .select()
     .single();
 
