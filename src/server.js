@@ -214,6 +214,57 @@ app.delete("/users/:id", authenticate, authorize("superadmin", "manager"), async
   res.json({ success: true });
 });
 
+// Tüm kullanıcıları listele (sadece superadmin)
+app.get("/admin/users", authenticate, authorize("superadmin"), async (req, res) => {
+  const { data, error } = await supabase
+    .from("users")
+    .select("id, username, role, workspace_id, created_at");
+
+  if (error) return res.status(500).json({ error: "Kullanıcılar alınamadı" });
+  res.json({ users: data });
+});
+
+// Kullanıcı güncelle (sadece superadmin)
+app.patch("/admin/users/:id", authenticate, authorize("superadmin"), async (req, res) => {
+  const { id } = req.params;
+  const { username, role, workspace_id } = req.body;
+
+  const { error } = await supabase
+    .from("users")
+    .update({ username, role, workspace_id })
+    .eq("id", id);
+
+  if (error) return res.status(500).json({ error: "Kullanıcı güncellenemedi" });
+  res.json({ success: true });
+});
+
+// Kullanıcı sil (sadece superadmin)
+app.delete("/admin/users/:id", authenticate, authorize("superadmin"), async (req, res) => {
+  const { id } = req.params;
+
+  if (id === req.user.id) {
+    return res.status(400).json({ error: "Kendinizi silemezsiniz" });
+  }
+
+  const { error } = await supabase
+    .from("users")
+    .delete()
+    .eq("id", id);
+
+  if (error) return res.status(500).json({ error: "Kullanıcı silinemedi" });
+  res.json({ success: true });
+});
+
+// Tüm workspace'leri listele (sadece superadmin)
+app.get("/admin/workspaces", authenticate, authorize("superadmin"), async (req, res) => {
+  const { data, error } = await supabase
+    .from("workspaces")
+    .select("id, name, owner_id, created_at");
+
+  if (error) return res.status(500).json({ error: "Workspace'ler alınamadı" });
+  res.json({ workspaces: data });
+});
+
 // ─── Timer Routes ─────────────────────────────────────────────────────────
 
 // Timer başlat
