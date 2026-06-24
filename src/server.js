@@ -182,6 +182,38 @@ app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
 });
 
+// Kullanıcıları listele
+app.get("/users", authenticate, authorize("superadmin", "manager"), async (req, res) => {
+  const { data, error } = await supabase
+    .from("users")
+    .select("id, username, role, created_at")
+    .eq("workspace_id", req.user.workspace_id);
+
+  if (error) return res.status(500).json({ error: "Kullanıcılar alınamadı" });
+
+  res.json({ users: data });
+});
+
+// Kullanıcı sil
+app.delete("/users/:id", authenticate, authorize("superadmin", "manager"), async (req, res) => {
+  const { id } = req.params;
+
+  // Kendini silemez
+  if (id === req.user.id) {
+    return res.status(400).json({ error: "Kendinizi silemezsiniz" });
+  }
+
+  const { error } = await supabase
+    .from("users")
+    .delete()
+    .eq("id", id)
+    .eq("workspace_id", req.user.workspace_id);
+
+  if (error) return res.status(500).json({ error: "Kullanıcı silinemedi" });
+
+  res.json({ success: true });
+});
+
 // ─── Timer Routes ─────────────────────────────────────────────────────────
 
 // Timer başlat
