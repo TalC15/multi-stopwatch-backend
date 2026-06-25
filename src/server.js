@@ -116,15 +116,16 @@ app.post("/workspace/create", authenticate, authorize("superadmin", "manager"), 
     return res.status(400).json({ error: "Workspace adı gerekli" });
   }
 
+  // Davet kodu üret
+  const inviteCode = Math.random().toString(36).substring(2, 8).toUpperCase();
+
   const { data: workspace, error } = await supabase
     .from("workspaces")
-    .insert({ name, owner_id: req.user.id })
+    .insert({ name, owner_id: req.user.id, invite_code: inviteCode })
     .select()
     .single();
 
-  if (error) {
-    return res.status(500).json({ error: "Workspace oluşturulamadı" });
-  }
+  if (error) return res.status(500).json({ error: "Workspace oluşturulamadı" });
 
   // Kullanıcıyı workspace'e bağla
   await supabase
@@ -133,6 +134,48 @@ app.post("/workspace/create", authenticate, authorize("superadmin", "manager"), 
     .eq("id", req.user.id);
 
   res.json({ success: true, workspace });
+});
+
+// Davet kodu ile katıl
+app.post("/workspace/join", authenticate, async (req, res) => {
+  const { inviteCode } = req.body;
+
+  if (!inviteCode) {
+    return res.status(400).json({ error: "Davet kodu gerekli" });
+  }
+
+  const { data: workspace, error } = await supabase
+    .from("workspaces")
+    .select("id, name")
+    .eq("invite_code", inviteCode.toUpperCase())
+    .single();
+
+  if (error || !workspace) {
+    return res.status(404).json({ error: "Geçersiz davet kodu" });
+  }
+
+  await supabase
+    .from("users")
+    .update({ workspace_id: workspace.id })
+    .eq("id", req.user.id);
+
+  res.json({ success: true, workspace });
+});
+
+// Workspace bilgisi
+app.get("/workspace", authenticate, async (req, res) => {
+  if (!req.user.workspace_id) {
+    return res.json({ workspace: null });
+  }
+
+  const { data, error } = await supabase
+    .from("workspaces")
+    .select("id, name, invite_code, owner_id")
+    .eq("id", req.user.workspace_id)
+    .single();
+
+  if (error) return res.status(500).json({ error: "Workspace alınamadı" });
+  res.json({ workspace: data });
 });
 
 // ─── Telegram Routes ──────────────────────────────────────────────────────
