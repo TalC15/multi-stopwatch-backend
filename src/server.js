@@ -232,13 +232,19 @@ app.post("/webhook", async (req, res) => {
 
 // Kullanıcıları listele
 app.get("/users", authenticate, authorize("superadmin", "manager"), async (req, res) => {
-  const { data, error } = await supabase
-    .from("users")
-    .select("id, username, role, created_at")
-    .eq("workspace_id", req.user.workspace_id);
+  // Superadmin tüm kullanıcıları görür, manager sadece kendi workspace'ini
+  let query = supabase.from("users").select("id, username, role, created_at, workspace_id");
+
+  if (req.user.role !== "superadmin") {
+    if (!req.user.workspace_id) {
+      return res.json({ users: [] });
+    }
+    query = query.eq("workspace_id", req.user.workspace_id);
+  }
+
+  const { data, error } = await query;
 
   if (error) return res.status(500).json({ error: "Kullanıcılar alınamadı" });
-
   res.json({ users: data });
 });
 
