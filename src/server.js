@@ -314,7 +314,7 @@ app.delete("/admin/users/:id", authenticate, authorize("superadmin"), async (req
 app.get("/admin/workspaces", authenticate, authorize("superadmin"), async (req, res) => {
   const { data, error } = await supabase
     .from("workspaces")
-    .select("id, name, owner_id, created_at");
+    .select("id, name, owner_id, created_at,invite_code");
 
   if (error) return res.status(500).json({ error: "Workspace'ler alınamadı" });
   res.json({ workspaces: data });
