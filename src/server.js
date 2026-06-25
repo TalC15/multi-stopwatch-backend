@@ -81,15 +81,18 @@ app.post("/users/create", authenticate, authorize("superadmin", "manager"), asyn
     return res.status(400).json({ error: "Eksik parametre" });
   }
 
-  // Manager sadece worker oluşturabilir
   if (req.user.role === "manager" && role !== "worker") {
     return res.status(403).json({ error: "Manager sadece worker oluşturabilir" });
   }
 
-  // Workspace ID — manager kendi workspace'ini kullanır, superadmin istediğini seçer
+  // Manager workspace'i yoksa worker oluşturamaz
+  if (req.user.role === "manager" && !req.user.workspace_id) {
+    return res.status(400).json({ error: "Önce bir workspace oluşturun" });
+  }
+
   const assignedWorkspaceId = req.user.role === "superadmin"
     ? (workspace_id || null)
-    : req.user.workspace_id;
+    : req.user.workspace_id; // Manager kendi workspace'ini atar
 
   const pin_hash = await hashPin(pin);
 
@@ -99,9 +102,7 @@ app.post("/users/create", authenticate, authorize("superadmin", "manager"), asyn
     .select()
     .single();
 
-  if (error) {
-    return res.status(500).json({ error: "Kullanıcı oluşturulamadı" });
-  }
+  if (error) return res.status(500).json({ error: "Kullanıcı oluşturulamadı" });
 
   res.json({ success: true, user: { id: data.id, username: data.username, role: data.role } });
 });
@@ -317,6 +318,74 @@ app.get("/admin/workspaces", authenticate, authorize("superadmin"), async (req, 
 
   if (error) return res.status(500).json({ error: "Workspace'ler alınamadı" });
   res.json({ workspaces: data });
+});
+
+// Workspace'den ayrıl
+app.post("/workspace/leave", authenticate, async (req, res) => {
+  if (!req.user.workspace_id) {
+    return res.status(400).json({ error: "Zaten bir workspace'de değilsiniz" });
+  }
+
+  // Manager ise workspace'de başka manager var mı kontrol et
+  if (req.user.role === "manager") {
+    const { data: otherManagers } = await supabase
+      .from("users")
+      .select("id")
+      .eq("workspace_id", req.user.workspace_id)
+      .eq("role", "manager")
+      .neq("id", req.user.id);
+
+    if (!otherManagers || otherManagers.length === 0) {
+      return res.status(400).json({ 
+        error: "Workspace'de tek manager sizsiniz. Ayrılmadan önce başka bir manager atayın." 
+      });
+    }
+  }
+
+  await supabase
+    .from("users")
+    .update({ workspace_id: null })
+    .eq("id", req.user.id);
+
+  res.json({ success: true });
+});
+
+// Davet kodu yenile
+app.post("/workspace/refresh-invite", authenticate, authorize("manager", "superadmin"), async (req, res) => {
+  if (!req.user.workspace_id) {
+    return res.status(400).json({ error: "Bir workspace'de değilsiniz" });
+  }
+
+  const newInviteCode = Math.random().toString(36).substring(2, 8).toUpperCase();
+
+  const { error } = await supabase
+    .from("workspaces")
+    .update({ invite_code: newInviteCode })
+    .eq("id", req.user.workspace_id);
+
+  if (error) return res.status(500).json({ error: "Davet kodu yenilenemedi" });
+
+  res.json({ success: true, invite_code: newInviteCode });
+});
+
+// Workspace detayı (superadmin)
+app.get("/admin/workspaces/:id", authenticate, authorize("superadmin"), async (req, res) => {
+  const { id } = req.params;
+
+  const { data: workspace, error } = await supabase
+    .from("workspaces")
+    .select("id, name, invite_code, owner_id, created_at")
+    .eq("id", id)
+    .single();
+
+  if (error || !workspace) return res.status(404).json({ error: "Workspace bulunamadı" });
+
+  const { data: members } = await supabase
+    .from("users")
+    .select("id, username, role, created_at")
+    .eq("workspace_id", id);
+
+  res.json({ workspace, members: members || [] });
 });
 
 // ─── Timer Routes ─────────────────────────────────────────────────────────
