@@ -388,6 +388,93 @@ app.get("/admin/workspaces/:id", authenticate, authorize("superadmin"), async (r
   res.json({ workspace, members: members || [] });
 });
 
+// Timer oluştur ve DB'ye kaydet
+app.post("/timers", authenticate, async (req, res) => {
+  const { id, name, type, targetMinutes, isShared } = req.body;
+
+  if (!id || !name || !type) {
+    return res.status(400).json({ error: "Eksik parametre" });
+  }
+
+  const { data, error } = await supabase
+    .from("timers")
+    .insert({
+      id,
+      name,
+      type,
+      target_minutes: targetMinutes,
+      is_shared: isShared || false,
+      is_pay: false,
+      status: "idle",
+      record_status: "active",
+      workspace_id: req.user.workspace_id || null,
+      created_by: req.user.id,
+      user_id: req.user.id,
+    })
+    .select()
+    .single();
+
+  if (error) return res.status(500).json({ error: "Timer oluşturulamadı" });
+  res.json({ success: true, timer: data });
+});
+
+// Timer güncelle (status, isPay vb.)
+app.patch("/timers/:id", authenticate, async (req, res) => {
+  const { id } = req.params;
+  const updates = req.body;
+
+  // Sadece sistem olayları güncelleyebilir — kritik alanlar korunuyor
+  const allowed = ["status", "is_pay", "started_at", "ends_at", "ended_at", "duration_ms", "paused_count", "record_status"];
+  const filtered = Object.fromEntries(
+    Object.entries(updates).filter(([key]) => allowed.includes(key))
+  );
+
+  if (Object.keys(filtered).length === 0) {
+    return res.status(400).json({ error: "Güncellenebilir alan yok" });
+  }
+
+  const { error } = await supabase
+    .from("timers")
+    .update(filtered)
+    .eq("id", id)
+    .eq("user_id", req.user.id);
+
+  if (error) return res.status(500).json({ error: "Timer güncellenemedi" });
+  res.json({ success: true });
+});
+
+// Timer sil (gerçekten silmez, record_status = deleted yapar)
+app.delete("/timers/:id", authenticate, async (req, res) => {
+  const { id } = req.params;
+
+  const { error } = await supabase
+    .from("timers")
+    .update({ record_status: "deleted" })
+    .eq("id", id)
+    .eq("user_id", req.user.id);
+
+  if (error) return res.status(500).json({ error: "Timer silinemedi" });
+  res.json({ success: true });
+});
+
+// Workspace'deki ortak timer'ları getir
+app.get("/timers/shared", authenticate, async (req, res) => {
+  if (!req.user.workspace_id) {
+    return res.json({ timers: [] });
+  }
+
+  const { data, error } = await supabase
+    .from("timers")
+    .select("*, users(username)")
+    .eq("workspace_id", req.user.workspace_id)
+    .eq("is_shared", true)
+    .eq("record_status", "active")
+    .order("created_at", { ascending: false });
+
+  if (error) return res.status(500).json({ error: "Timer'lar alınamadı" });
+  res.json({ timers: data });
+});
+
 // ─── Timer Routes ─────────────────────────────────────────────────────────
 
 // Timer başlat
@@ -433,7 +520,7 @@ app.get("/health", (req, res) => {
   res.json({ status: "ok" });
 });
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3005;
 app.listen(PORT, () => {
   console.log(`[Server] ${PORT} portunda çalışıyor`);
 });
