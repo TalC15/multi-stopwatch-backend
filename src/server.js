@@ -502,21 +502,16 @@ app.patch("/timers/:id", authenticate, async (req, res) => {
     Object.entries(updates).filter(([key]) => allowed.includes(key))
   );
 
-  // started_at sadece ilk kez running olunca ayarlanır
-  if (filtered.status === "running") {
-    const { data: existing } = await supabase
-      .from("timers")
-      .select("started_at")
-      .eq("id", id)
-      .single();
-
-    if (!existing?.started_at) {
-      filtered.started_at = new Date().toISOString();
-    }
-  }
-
   if (Object.keys(filtered).length === 0) {
     return res.status(400).json({ error: "Güncellenebilir alan yok" });
+  }
+
+  // status running ise started_at'i sadece null ise ata — tek sorguda
+  if (filtered.status === "running") {
+    const { error: rpcError } = await supabase.rpc('set_started_at_if_null', {
+      timer_id: id,
+      new_started_at: new Date().toISOString(),
+    });
   }
 
   const { error } = await supabase
