@@ -3,7 +3,16 @@ import cors from "cors";
 import dotenv from "dotenv";
 import { scheduleTimer, cancelTimer } from "./timers.js";
 import { sendTelegramMessage } from "./telegram.js";
-import { authenticate, authorize, createSuperAdminIfNotExists, hashPin, verifyPin, generateAccessToken, generateRefreshToken, verifyToken } from "./auth.js";
+import {
+  authenticate,
+  authorize,
+  createSuperAdminIfNotExists,
+  hashPin,
+  verifyPin,
+  generateAccessToken,
+  generateRefreshToken,
+  verifyToken,
+} from "./auth.js";
 import supabase from "./db.js";
 
 dotenv.config();
@@ -74,68 +83,86 @@ app.post("/auth/refresh", (req, res) => {
 // ─── Kullanıcı Yönetimi (sadece superadmin ve manager) ───────────────────
 
 // Kullanıcı oluştur
-app.post("/users/create", authenticate, authorize("superadmin", "manager"), async (req, res) => {
-  const { username, pin, role, workspace_id } = req.body;
+app.post(
+  "/users/create",
+  authenticate,
+  authorize("superadmin", "manager"),
+  async (req, res) => {
+    const { username, pin, role, workspace_id } = req.body;
 
-  if (!username || !pin || !role) {
-    return res.status(400).json({ error: "Eksik parametre" });
-  }
+    if (!username || !pin || !role) {
+      return res.status(400).json({ error: "Eksik parametre" });
+    }
 
-  if (req.user.role === "manager" && role !== "worker") {
-    return res.status(403).json({ error: "Manager sadece worker oluşturabilir" });
-  }
+    if (req.user.role === "manager" && role !== "worker") {
+      return res
+        .status(403)
+        .json({ error: "Manager sadece worker oluşturabilir" });
+    }
 
-  // Manager workspace'i yoksa worker oluşturamaz
-  if (req.user.role === "manager" && !req.user.workspace_id) {
-    return res.status(400).json({ error: "Önce bir workspace oluşturun" });
-  }
+    // Manager workspace'i yoksa worker oluşturamaz
+    if (req.user.role === "manager" && !req.user.workspace_id) {
+      return res.status(400).json({ error: "Önce bir workspace oluşturun" });
+    }
 
-  const assignedWorkspaceId = req.user.role === "superadmin"
-    ? (workspace_id || null)
-    : req.user.workspace_id; // Manager kendi workspace'ini atar
+    const assignedWorkspaceId =
+      req.user.role === "superadmin"
+        ? workspace_id || null
+        : req.user.workspace_id; // Manager kendi workspace'ini atar
 
-  const pin_hash = await hashPin(pin);
+    const pin_hash = await hashPin(pin);
 
-  const { data, error } = await supabase
-    .from("users")
-    .insert({ username, pin_hash, role, workspace_id: assignedWorkspaceId })
-    .select()
-    .single();
+    const { data, error } = await supabase
+      .from("users")
+      .insert({ username, pin_hash, role, workspace_id: assignedWorkspaceId })
+      .select()
+      .single();
 
-  if (error) return res.status(500).json({ error: "Kullanıcı oluşturulamadı" });
+    if (error)
+      return res.status(500).json({ error: "Kullanıcı oluşturulamadı" });
 
-  res.json({ success: true, user: { id: data.id, username: data.username, role: data.role } });
-});
+    res.json({
+      success: true,
+      user: { id: data.id, username: data.username, role: data.role },
+    });
+  },
+);
 
 // ─── Workspace Routes ─────────────────────────────────────────────────────
 
 // Workspace oluştur
-app.post("/workspace/create", authenticate, authorize("superadmin", "manager"), async (req, res) => {
-  const { name } = req.body;
+app.post(
+  "/workspace/create",
+  authenticate,
+  authorize("superadmin", "manager"),
+  async (req, res) => {
+    const { name } = req.body;
 
-  if (!name) {
-    return res.status(400).json({ error: "Workspace adı gerekli" });
-  }
+    if (!name) {
+      return res.status(400).json({ error: "Workspace adı gerekli" });
+    }
 
-  // Davet kodu üret
-  const inviteCode = Math.random().toString(36).substring(2, 8).toUpperCase();
+    // Davet kodu üret
+    const inviteCode = Math.random().toString(36).substring(2, 8).toUpperCase();
 
-  const { data: workspace, error } = await supabase
-    .from("workspaces")
-    .insert({ name, owner_id: req.user.id, invite_code: inviteCode })
-    .select()
-    .single();
+    const { data: workspace, error } = await supabase
+      .from("workspaces")
+      .insert({ name, owner_id: req.user.id, invite_code: inviteCode })
+      .select()
+      .single();
 
-  if (error) return res.status(500).json({ error: "Workspace oluşturulamadı" });
+    if (error)
+      return res.status(500).json({ error: "Workspace oluşturulamadı" });
 
-  // Kullanıcıyı workspace'e bağla
-  await supabase
-    .from("users")
-    .update({ workspace_id: workspace.id })
-    .eq("id", req.user.id);
+    // Kullanıcıyı workspace'e bağla
+    await supabase
+      .from("users")
+      .update({ workspace_id: workspace.id })
+      .eq("id", req.user.id);
 
-  res.json({ success: true, workspace });
-});
+    res.json({ success: true, workspace });
+  },
+);
 
 // Davet kodu ile katıl
 app.post("/workspace/join", authenticate, async (req, res) => {
@@ -232,93 +259,124 @@ app.post("/webhook", async (req, res) => {
 });
 
 // Kullanıcıları listele
-app.get("/users", authenticate, authorize("superadmin", "manager"), async (req, res) => {
-  // Superadmin tüm kullanıcıları görür, manager sadece kendi workspace'ini
-  let query = supabase.from("users").select("id, username, role, created_at, workspace_id");
+app.get(
+  "/users",
+  authenticate,
+  authorize("superadmin", "manager"),
+  async (req, res) => {
+    // Superadmin tüm kullanıcıları görür, manager sadece kendi workspace'ini
+    let query = supabase
+      .from("users")
+      .select("id, username, role, created_at, workspace_id");
 
-  if (req.user.role !== "superadmin") {
-    if (!req.user.workspace_id) {
-      return res.json({ users: [] });
+    if (req.user.role !== "superadmin") {
+      if (!req.user.workspace_id) {
+        return res.json({ users: [] });
+      }
+      query = query.eq("workspace_id", req.user.workspace_id);
     }
-    query = query.eq("workspace_id", req.user.workspace_id);
-  }
 
-  const { data, error } = await query;
+    const { data, error } = await query;
 
-  if (error) return res.status(500).json({ error: "Kullanıcılar alınamadı" });
-  res.json({ users: data });
-});
+    if (error) return res.status(500).json({ error: "Kullanıcılar alınamadı" });
+    res.json({ users: data });
+  },
+);
 
 // Kullanıcı sil
-app.delete("/users/:id", authenticate, authorize("superadmin", "manager"), async (req, res) => {
-  const { id } = req.params;
+app.delete(
+  "/users/:id",
+  authenticate,
+  authorize("superadmin", "manager"),
+  async (req, res) => {
+    const { id } = req.params;
 
-  // Kendini silemez
-  if (id === req.user.id) {
-    return res.status(400).json({ error: "Kendinizi silemezsiniz" });
-  }
+    // Kendini silemez
+    if (id === req.user.id) {
+      return res.status(400).json({ error: "Kendinizi silemezsiniz" });
+    }
 
-  const { error } = await supabase
-    .from("users")
-    .delete()
-    .eq("id", id)
-    .eq("workspace_id", req.user.workspace_id);
+    const { error } = await supabase
+      .from("users")
+      .delete()
+      .eq("id", id)
+      .eq("workspace_id", req.user.workspace_id);
 
-  if (error) return res.status(500).json({ error: "Kullanıcı silinemedi" });
+    if (error) return res.status(500).json({ error: "Kullanıcı silinemedi" });
 
-  res.json({ success: true });
-});
+    res.json({ success: true });
+  },
+);
 
 // Tüm kullanıcıları listele (sadece superadmin)
-app.get("/admin/users", authenticate, authorize("superadmin"), async (req, res) => {
-  const { data, error } = await supabase
-    .from("users")
-    .select("id, username, role, workspace_id, created_at");
+app.get(
+  "/admin/users",
+  authenticate,
+  authorize("superadmin"),
+  async (req, res) => {
+    const { data, error } = await supabase
+      .from("users")
+      .select("id, username, role, workspace_id, created_at");
 
-  if (error) return res.status(500).json({ error: "Kullanıcılar alınamadı" });
-  res.json({ users: data });
-});
+    if (error) return res.status(500).json({ error: "Kullanıcılar alınamadı" });
+    res.json({ users: data });
+  },
+);
 
 // Kullanıcı güncelle (sadece superadmin)
-app.patch("/admin/users/:id", authenticate, authorize("superadmin"), async (req, res) => {
-  const { id } = req.params;
-  const { username, role, workspace_id } = req.body;
+app.patch(
+  "/admin/users/:id",
+  authenticate,
+  authorize("superadmin"),
+  async (req, res) => {
+    const { id } = req.params;
+    const { username, role, workspace_id } = req.body;
 
-  const { error } = await supabase
-    .from("users")
-    .update({ username, role, workspace_id })
-    .eq("id", id);
+    const { error } = await supabase
+      .from("users")
+      .update({ username, role, workspace_id })
+      .eq("id", id);
 
-  if (error) return res.status(500).json({ error: "Kullanıcı güncellenemedi" });
-  res.json({ success: true });
-});
+    if (error)
+      return res.status(500).json({ error: "Kullanıcı güncellenemedi" });
+    res.json({ success: true });
+  },
+);
 
 // Kullanıcı sil (sadece superadmin)
-app.delete("/admin/users/:id", authenticate, authorize("superadmin"), async (req, res) => {
-  const { id } = req.params;
+app.delete(
+  "/admin/users/:id",
+  authenticate,
+  authorize("superadmin"),
+  async (req, res) => {
+    const { id } = req.params;
 
-  if (id === req.user.id) {
-    return res.status(400).json({ error: "Kendinizi silemezsiniz" });
-  }
+    if (id === req.user.id) {
+      return res.status(400).json({ error: "Kendinizi silemezsiniz" });
+    }
 
-  const { error } = await supabase
-    .from("users")
-    .delete()
-    .eq("id", id);
+    const { error } = await supabase.from("users").delete().eq("id", id);
 
-  if (error) return res.status(500).json({ error: "Kullanıcı silinemedi" });
-  res.json({ success: true });
-});
+    if (error) return res.status(500).json({ error: "Kullanıcı silinemedi" });
+    res.json({ success: true });
+  },
+);
 
 // Tüm workspace'leri listele (sadece superadmin)
-app.get("/admin/workspaces", authenticate, authorize("superadmin"), async (req, res) => {
-  const { data, error } = await supabase
-    .from("workspaces")
-    .select("id, name, owner_id, created_at,invite_code");
+app.get(
+  "/admin/workspaces",
+  authenticate,
+  authorize("superadmin"),
+  async (req, res) => {
+    const { data, error } = await supabase
+      .from("workspaces")
+      .select("id, name, owner_id, created_at,invite_code");
 
-  if (error) return res.status(500).json({ error: "Workspace'ler alınamadı" });
-  res.json({ workspaces: data });
-});
+    if (error)
+      return res.status(500).json({ error: "Workspace'ler alınamadı" });
+    res.json({ workspaces: data });
+  },
+);
 
 // Workspace'den ayrıl
 app.post("/workspace/leave", authenticate, async (req, res) => {
@@ -336,8 +394,9 @@ app.post("/workspace/leave", authenticate, async (req, res) => {
       .neq("id", req.user.id);
 
     if (!otherManagers || otherManagers.length === 0) {
-      return res.status(400).json({ 
-        error: "Workspace'de tek manager sizsiniz. Ayrılmadan önce başka bir manager atayın." 
+      return res.status(400).json({
+        error:
+          "Workspace'de tek manager sizsiniz. Ayrılmadan önce başka bir manager atayın.",
       });
     }
   }
@@ -351,42 +410,57 @@ app.post("/workspace/leave", authenticate, async (req, res) => {
 });
 
 // Davet kodu yenile
-app.post("/workspace/refresh-invite", authenticate, authorize("manager", "superadmin"), async (req, res) => {
-  if (!req.user.workspace_id) {
-    return res.status(400).json({ error: "Bir workspace'de değilsiniz" });
-  }
+app.post(
+  "/workspace/refresh-invite",
+  authenticate,
+  authorize("manager", "superadmin"),
+  async (req, res) => {
+    if (!req.user.workspace_id) {
+      return res.status(400).json({ error: "Bir workspace'de değilsiniz" });
+    }
 
-  const newInviteCode = Math.random().toString(36).substring(2, 8).toUpperCase();
+    const newInviteCode = Math.random()
+      .toString(36)
+      .substring(2, 8)
+      .toUpperCase();
 
-  const { error } = await supabase
-    .from("workspaces")
-    .update({ invite_code: newInviteCode })
-    .eq("id", req.user.workspace_id);
+    const { error } = await supabase
+      .from("workspaces")
+      .update({ invite_code: newInviteCode })
+      .eq("id", req.user.workspace_id);
 
-  if (error) return res.status(500).json({ error: "Davet kodu yenilenemedi" });
+    if (error)
+      return res.status(500).json({ error: "Davet kodu yenilenemedi" });
 
-  res.json({ success: true, invite_code: newInviteCode });
-});
+    res.json({ success: true, invite_code: newInviteCode });
+  },
+);
 
 // Workspace detayı (superadmin)
-app.get("/admin/workspaces/:id", authenticate, authorize("superadmin"), async (req, res) => {
-  const { id } = req.params;
+app.get(
+  "/admin/workspaces/:id",
+  authenticate,
+  authorize("superadmin"),
+  async (req, res) => {
+    const { id } = req.params;
 
-  const { data: workspace, error } = await supabase
-    .from("workspaces")
-    .select("id, name, invite_code, owner_id, created_at")
-    .eq("id", id)
-    .single();
+    const { data: workspace, error } = await supabase
+      .from("workspaces")
+      .select("id, name, invite_code, owner_id, created_at")
+      .eq("id", id)
+      .single();
 
-  if (error || !workspace) return res.status(404).json({ error: "Workspace bulunamadı" });
+    if (error || !workspace)
+      return res.status(404).json({ error: "Workspace bulunamadı" });
 
-  const { data: members } = await supabase
-    .from("users")
-    .select("id, username, role, created_at")
-    .eq("workspace_id", id);
+    const { data: members } = await supabase
+      .from("users")
+      .select("id, username, role, created_at")
+      .eq("workspace_id", id);
 
-  res.json({ workspace, members: members || [] });
-});
+    res.json({ workspace, members: members || [] });
+  },
+);
 
 // Timer oluştur ve DB'ye kaydet
 app.post("/timers", authenticate, async (req, res) => {
@@ -423,11 +497,23 @@ app.patch("/timers/:id", authenticate, async (req, res) => {
   const { id } = req.params;
   const updates = req.body;
 
-  // Sadece sistem olayları güncelleyebilir — kritik alanlar korunuyor
-  const allowed = ["status", "is_pay", "started_at", "ends_at", "ended_at", "duration_ms", "paused_count", "record_status"];
+  const allowed = ["status", "is_pay", "ends_at", "ended_at", "duration_ms", "paused_count", "record_status"];
   const filtered = Object.fromEntries(
     Object.entries(updates).filter(([key]) => allowed.includes(key))
   );
+
+  // started_at sadece ilk kez running olunca ayarlanır
+  if (filtered.status === "running") {
+    const { data: existing } = await supabase
+      .from("timers")
+      .select("started_at")
+      .eq("id", id)
+      .single();
+
+    if (!existing?.started_at) {
+      filtered.started_at = new Date().toISOString();
+    }
+  }
 
   if (Object.keys(filtered).length === 0) {
     return res.status(400).json({ error: "Güncellenebilir alan yok" });
@@ -479,8 +565,9 @@ app.get("/timers/shared", authenticate, async (req, res) => {
 
 // Timer başlat
 app.post("/timer/start", authenticate, async (req, res) => {
-  const { timerId, timerName, timerIsPay, endsAt } = req.body;
+  const { timerId, timerName,endsAt } = req.body;
 
+  console.log(req.body);
   if (!timerId || !timerName || !endsAt) {
     return res.status(400).json({ error: "Eksik parametre" });
   }
@@ -495,10 +582,26 @@ app.post("/timer/start", authenticate, async (req, res) => {
     return res.status(400).json({ error: "Telegram kaydı yok" });
   }
 
-  scheduleTimer(req.user.id, timerId, timerName, timerIsPay, endsAt, async (uid, tid, name, isPay) => {
-    const paid = isPay ? "ODENDI" : "ODENMEDI";
-    await sendTelegramMessage(user.telegram_chat_id, `${name} bitti! ${paid}`);
-  });
+  scheduleTimer(
+    req.user.id,
+    timerId,
+    timerName,
+    endsAt,
+    async (uid, tid, name) => {
+      // Timer bitince DB'den güncel isPay değerini oku
+      const { data: timer } = await supabase
+        .from("timers")
+        .select("is_pay")
+        .eq("id", tid)
+        .single();
+
+      const paid = timer?.is_pay ? "ÖDENDİ" : "ÖDENMEDİ";
+      await sendTelegramMessage(
+        user.telegram_chat_id,
+        `${name} bitti! ${paid}`,
+      );
+    },
+  );
 
   res.json({ success: true });
 });

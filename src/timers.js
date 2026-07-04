@@ -1,6 +1,6 @@
 const timers = new Map();
 
-export function scheduleTimer(userId, timerId, timerName, timerIsPay, endsAt, onEnd) {
+export function scheduleTimer(userId, timerId, timerName, endsAt, onEnd) {
   if (timers.has(timerId)) {
     clearTimeout(timers.get(timerId).timeout);
   }
@@ -8,7 +8,7 @@ export function scheduleTimer(userId, timerId, timerName, timerIsPay, endsAt, on
   const delay = endsAt - Date.now();
 
   if (delay <= 0) {
-    onEnd(userId, timerId, timerName, timerIsPay);
+    onEnd(userId, timerId, timerName);
     return;
   }
 
@@ -16,7 +16,7 @@ export function scheduleTimer(userId, timerId, timerName, timerIsPay, endsAt, on
 
   const timeout = setTimeout(() => {
     timers.delete(timerId);
-    onEnd(userId, timerId, timerName, timerIsPay);
+    onEnd(userId, timerId, timerName);
   }, delay);
 
   timers.set(timerId, { timeout, timerName });
