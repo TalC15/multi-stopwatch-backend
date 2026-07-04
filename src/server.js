@@ -1,6 +1,8 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
+import { createServer } from "http";
+import { Server } from "socket.io";
 import { scheduleTimer, cancelTimer } from "./timers.js";
 import { sendTelegramMessage } from "./telegram.js";
 import {
@@ -20,6 +22,12 @@ dotenv.config();
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+// HTTP server oluştur — Socket.io bunun üzerine kurulacak
+const httpServer = createServer(app);
+const io = new Server(httpServer, {
+  cors: { origin: "*" }, // şimdilik herkese açık, ileride kısıtlarız
+});
 
 // Superadmin ilk kurulumda oluştur
 createSuperAdminIfNotExists();
@@ -618,7 +626,32 @@ app.get("/health", (req, res) => {
   res.json({ status: "ok" });
 });
 
-const PORT = process.env.PORT || 3005;
-app.listen(PORT, () => {
-  console.log(`[Server] ${PORT} portunda çalışıyor`);
+// ─── Socket.io — Ortak Ekran ──────────────────────────────────────────────
+
+io.on("connection", (socket) => {
+  console.log("[Socket] Bağlandı:", socket.id);
+
+  // Kullanıcı workspace odasına katılır
+  socket.on("join-workspace", (workspaceId) => {
+    if (!workspaceId) return;
+    socket.join(`workspace-${workspaceId}`);
+    console.log(`[Socket] ${socket.id} → workspace-${workspaceId} odasına katıldı`);
+  });
+
+  // Timer değişikliği — sadece aynı odadakilere ilet
+  socket.on("timer-event", ({ workspaceId, event, data }) => {
+    if (!workspaceId) return;
+    // socket.to() → gönderen hariç odadaki herkese iletir
+    socket.to(`workspace-${workspaceId}`).emit("timer-event", { event, data });
+    console.log(`[Socket] workspace-${workspaceId} → ${event} yayınlandı`);
+  });
+
+  socket.on("disconnect", () => {
+    console.log("[Socket] Ayrıldı:", socket.id);
+  });
+});
+
+const PORT = process.env.PORT || 3000;
+httpServer.listen(PORT, () => {
+  console.log(`[Server] ${PORT} portunda çalışıyor (HTTP + WebSocket)`);
 });
