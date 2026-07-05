@@ -206,13 +206,38 @@ app.get("/workspace", authenticate, async (req, res) => {
 
   const { data, error } = await supabase
     .from("workspaces")
-    .select("id, name, invite_code, owner_id")
+    .select("id, name, invite_code, owner_id,shared_mode_enabled")
     .eq("id", req.user.workspace_id)
     .single();
 
   if (error) return res.status(500).json({ error: "Workspace alınamadı" });
   res.json({ workspace: data });
 });
+
+// Shared mode aç/kapat (sadece manager/superadmin)
+app.post("/workspace/toggle-shared",authenticate,authorize("manager", "superadmin"),
+  async (req, res) => {
+    if (!req.user.workspace_id) {
+      return res.status(400).json({ error: "Bir workspace'de değilsiniz" });
+    }
+
+    const { data: workspace } = await supabase
+      .from("workspaces")
+      .select("shared_mode_enabled")
+      .eq("id", req.user.workspace_id)
+      .single();
+
+    const newValue = !workspace.shared_mode_enabled;
+
+    const { error } = await supabase
+      .from("workspaces")
+      .update({ shared_mode_enabled: newValue })
+      .eq("id", req.user.workspace_id);
+
+    if (error) return res.status(500).json({ error: "Güncellenemedi" });
+    res.json({ success: true, shared_mode_enabled: newValue });
+  },
+);
 
 // ─── Telegram Routes ──────────────────────────────────────────────────────
 
@@ -505,9 +530,17 @@ app.patch("/timers/:id", authenticate, async (req, res) => {
   const { id } = req.params;
   const updates = req.body;
 
-  const allowed = ["status", "is_pay", "ends_at", "ended_at", "duration_ms", "paused_count", "record_status"];
+  const allowed = [
+    "status",
+    "is_pay",
+    "ends_at",
+    "ended_at",
+    "duration_ms",
+    "paused_count",
+    "record_status",
+  ];
   const filtered = Object.fromEntries(
-    Object.entries(updates).filter(([key]) => allowed.includes(key))
+    Object.entries(updates).filter(([key]) => allowed.includes(key)),
   );
 
   if (Object.keys(filtered).length === 0) {
@@ -516,7 +549,7 @@ app.patch("/timers/:id", authenticate, async (req, res) => {
 
   // status running ise started_at'i sadece null ise ata — tek sorguda
   if (filtered.status === "running") {
-    const { error: rpcError } = await supabase.rpc('set_started_at_if_null', {
+    const { error: rpcError } = await supabase.rpc("set_started_at_if_null", {
       timer_id: id,
       new_started_at: new Date().toISOString(),
     });
@@ -568,7 +601,7 @@ app.get("/timers/shared", authenticate, async (req, res) => {
 
 // Timer başlat
 app.post("/timer/start", authenticate, async (req, res) => {
-  const { timerId, timerName,endsAt } = req.body;
+  const { timerId, timerName, endsAt } = req.body;
 
   console.log(req.body);
   if (!timerId || !timerName || !endsAt) {
@@ -635,7 +668,9 @@ io.on("connection", (socket) => {
   socket.on("join-workspace", (workspaceId) => {
     if (!workspaceId) return;
     socket.join(`workspace-${workspaceId}`);
-    console.log(`[Socket] ${socket.id} → workspace-${workspaceId} odasına katıldı`);
+    console.log(
+      `[Socket] ${socket.id} → workspace-${workspaceId} odasına katıldı`,
+    );
   });
 
   // Timer değişikliği — sadece aynı odadakilere ilet
