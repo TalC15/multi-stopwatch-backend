@@ -618,26 +618,34 @@ app.post("/timer/start", authenticate, async (req, res) => {
     return res.status(400).json({ error: "Telegram kaydı yok" });
   }
 
-  scheduleTimer(
-    req.user.id,
-    timerId,
-    timerName,
-    endsAt,
-    async (uid, tid, name) => {
-      // Timer bitince DB'den güncel isPay değerini oku
-      const { data: timer } = await supabase
-        .from("timers")
-        .select("is_pay")
-        .eq("id", tid)
-        .single();
+  scheduleTimer(req.user.id, timerId, timerName, endsAt, async (uid, tid, name) => {
+  const { data: timer } = await supabase
+    .from("timers")
+    .select("is_pay, workspace_id")
+    .eq("id", tid)
+    .single();
 
-      const paid = timer?.is_pay ? "ÖDENDİ" : "ÖDENMEDİ";
-      await sendTelegramMessage(
-        user.telegram_chat_id,
-        `${name} bitti! ${paid}`,
+  const paid = timer?.is_pay ? "ODENDI" : "ODENMEDI";
+  const messageText = `${name} bitti! ${paid}`;
+
+  if (timer?.workspace_id) {
+    // Toplu — workspace'teki herkese gönder
+    const { data: members } = await supabase
+      .from("users")
+      .select("telegram_chat_id")
+      .eq("workspace_id", timer.workspace_id)
+      .not("telegram_chat_id", "is", null);
+
+    if (members && members.length > 0) {
+      await Promise.all(
+        members.map((m) => sendTelegramMessage(m.telegram_chat_id, messageText))
       );
-    },
-  );
+    }
+  } else {
+    // Bireysel — sadece kendine gönder
+    await sendTelegramMessage(user.telegram_chat_id, messageText);
+  }
+});
 
   res.json({ success: true });
 });
