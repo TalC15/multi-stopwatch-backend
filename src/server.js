@@ -512,6 +512,7 @@ app.post("/timers", authenticate, async (req, res) => {
       target_minutes: targetMinutes,
       is_shared: isShared || false,
       is_pay: false,
+      accumulated_ms: 0,
       status: "idle",
       record_status: "active",
       workspace_id: req.user.workspace_id || null,
@@ -538,6 +539,7 @@ app.patch("/timers/:id", authenticate, async (req, res) => {
     "duration_ms",
     "paused_count",
     "record_status",
+    "accumulated_ms",
   ];
   const filtered = Object.fromEntries(
     Object.entries(updates).filter(([key]) => allowed.includes(key)),
