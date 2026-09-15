@@ -589,7 +589,7 @@ app.get("/timers/shared", authenticate, async (req, res) => {
 
   const { data, error } = await supabase
     .from("timers")
-    .select("*, users(username)")
+    .select("*, users!created_by(username)")
     .eq("workspace_id", req.user.workspace_id)
     .eq("is_shared", true)
     .eq("record_status", "active")
