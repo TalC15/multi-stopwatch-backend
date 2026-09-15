@@ -571,11 +571,31 @@ app.patch("/timers/:id", authenticate, async (req, res) => {
 app.delete("/timers/:id", authenticate, async (req, res) => {
   const { id } = req.params;
 
+  // Önce timer'ın sahibini ve paylaşım durumunu öğren
+  const { data: existing, error: fetchError } = await supabase
+    .from("timers")
+    .select("user_id, is_shared, workspace_id")
+    .eq("id", id)
+    .single();
+
+  if (fetchError || !existing) {
+    return res.status(404).json({ error: "Timer bulunamadı" });
+  }
+
+  // Ortak (shared) timer'ı aynı workspace'teki herkes silebilir.
+  // Kişisel timer'ı sadece sahibi silebilir.
+  const canDelete = existing.is_shared
+    ? existing.workspace_id === req.user.workspace_id
+    : existing.user_id === req.user.id;
+
+  if (!canDelete) {
+    return res.status(403).json({ error: "Bu timer'ı silme yetkiniz yok" });
+  }
+
   const { error } = await supabase
     .from("timers")
     .update({ record_status: "deleted" })
-    .eq("id", id)
-    .eq("user_id", req.user.id);
+    .eq("id", id);
 
   if (error) return res.status(500).json({ error: "Timer silinemedi" });
   res.json({ success: true });
