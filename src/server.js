@@ -595,9 +595,9 @@ app.get("/timers/shared", authenticate, async (req, res) => {
     .eq("record_status", "active")
     .order("created_at", { ascending: false });
 
-  if (error) return res.status(500).json({ error: "Timer'lar alınamadı" }); if (error) {
+   if (error) {
     console.error("[/timers/shared] Supabase hatası:", error);
-    return res.status(500).json({ error: "Timer'lar alınamadı" });
+    return res.status(500).json({ error: "Timer'lar alınamadı", debug: error.message, debugFull: error });
   }
   res.json({ timers: data });
 });
