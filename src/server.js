@@ -571,10 +571,10 @@ app.patch("/timers/:id", authenticate, async (req, res) => {
 app.delete("/timers/:id", authenticate, async (req, res) => {
   const { id } = req.params;
 
-  // Önce timer'ın sahibini ve paylaşım durumunu öğren
+  // Timer'ı bul
   const { data: existing, error: fetchError } = await supabase
     .from("timers")
-    .select("user_id, is_shared, workspace_id")
+    .select("user_id, is_shared, workspace_id, record_status")
     .eq("id", id)
     .single();
 
@@ -582,23 +582,47 @@ app.delete("/timers/:id", authenticate, async (req, res) => {
     return res.status(404).json({ error: "Timer bulunamadı" });
   }
 
-  // Ortak (shared) timer'ı aynı workspace'teki herkes silebilir.
-  // Kişisel timer'ı sadece sahibi silebilir.
+  // Yetki kontrolü
   const canDelete = existing.is_shared
     ? existing.workspace_id === req.user.workspace_id
     : existing.user_id === req.user.id;
 
   if (!canDelete) {
-    return res.status(403).json({ error: "Bu timer'ı silme yetkiniz yok" });
+    return res.status(403).json({
+      error: "Bu timer'ı silme yetkiniz yok",
+    });
   }
 
-  const { error } = await supabase
+  // Soft delete
+  const { data: updated, error: updateError } = await supabase
     .from("timers")
     .update({ record_status: "deleted" })
-    .eq("id", id);
+    .eq("id", id)
+    .select("id, record_status")
+    .single();
 
-  if (error) return res.status(500).json({ error: "Timer silinemedi" });
-  res.json({ success: true });
+  if (updateError) {
+    console.error("Timer update hatası:", updateError);
+
+    return res.status(500).json({
+      error: "Timer silinemedi",
+      details: updateError.message,
+    });
+  }
+
+  // Gerçekten deleted oldu mu?
+  if (!updated || updated.record_status !== "deleted") {
+    console.error("Timer güncellenmedi:", updated);
+
+    return res.status(500).json({
+      error: "Timer güncellemesi doğrulanamadı",
+    });
+  }
+
+  res.json({
+    success: true,
+    timer: updated,
+  });
 });
 
 // Workspace'deki ortak timer'ları getir
