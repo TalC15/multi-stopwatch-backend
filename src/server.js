@@ -1,6 +1,8 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
+import crypto from "crypto";
+import rateLimit from "express-rate-limit";
 import { createServer } from "http";
 import { Server } from "socket.io";
 import { scheduleTimer, cancelTimer } from "./timers.js";
@@ -14,6 +16,7 @@ import {
   generateAccessToken,
   generateRefreshToken,
   verifyToken,
+  hashToken,
 } from "./auth.js";
 import supabase from "./db.js";
 
@@ -32,14 +35,59 @@ const io = new Server(httpServer, {
 // Superadmin ilk kurulumda oluştur
 createSuperAdminIfNotExists();
 
+// ─── Login güvenliği ────────────────────────────────────────────────────────
+
+// IP bazlı: aynı IP'den 15 dakikada en fazla 10 login denemesi
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  message: { error: "Çok fazla deneme yapıldı, lütfen daha sonra tekrar deneyin" },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// Kullanıcı adı bazlı: aynı kullanıcı adına 15 dakikada en fazla 5 başarısız deneme
+const failedLoginAttempts = new Map();
+const MAX_FAILED_ATTEMPTS = 5;
+const LOCKOUT_WINDOW_MS = 15 * 60 * 1000;
+
+function isLockedOut(username) {
+  const entry = failedLoginAttempts.get(username);
+  if (!entry) return false;
+  if (Date.now() - entry.firstAttempt > LOCKOUT_WINDOW_MS) {
+    failedLoginAttempts.delete(username);
+    return false;
+  }
+  return entry.count >= MAX_FAILED_ATTEMPTS;
+}
+
+function recordFailedAttempt(username) {
+  const entry = failedLoginAttempts.get(username);
+  if (!entry || Date.now() - entry.firstAttempt > LOCKOUT_WINDOW_MS) {
+    failedLoginAttempts.set(username, { count: 1, firstAttempt: Date.now() });
+  } else {
+    entry.count++;
+  }
+}
+
+function clearFailedAttempts(username) {
+  failedLoginAttempts.delete(username);
+}
+
 // ─── Auth Routes ──────────────────────────────────────────────────────────
 
 // Giriş
-app.post("/auth/login", async (req, res) => {
+app.post("/auth/login", loginLimiter, async (req, res) => {
   const { username, pin } = req.body;
 
   if (!username || !pin) {
     return res.status(400).json({ error: "Kullanıcı adı ve PIN gerekli" });
+  }
+
+  if (isLockedOut(username)) {
+    return res.status(429).json({
+      error: "Çok fazla başarısız deneme. Lütfen 15 dakika sonra tekrar deneyin.",
+    });
   }
 
   const { data: user, error } = await supabase
@@ -48,17 +96,36 @@ app.post("/auth/login", async (req, res) => {
     .eq("username", username)
     .single();
 
+  // Kullanıcı bulunamadı ve PIN hatalı aynı mesajı döner (enumeration önleme)
   if (error || !user) {
-    return res.status(401).json({ error: "Kullanıcı bulunamadı" });
+    recordFailedAttempt(username);
+    return res.status(401).json({ error: "Kullanıcı adı veya PIN hatalı" });
   }
 
   const pinValid = await verifyPin(pin, user.pin_hash);
   if (!pinValid) {
-    return res.status(401).json({ error: "PIN hatalı" });
+    recordFailedAttempt(username);
+    return res.status(401).json({ error: "Kullanıcı adı veya PIN hatalı" });
   }
 
-  const accessToken = generateAccessToken(user);
-  const refreshToken = generateRefreshToken(user);
+  clearFailedAttempts(username);
+
+  // Yeni bir oturum (session) kaydı oluştur
+  const sessionId = crypto.randomUUID();
+  const accessToken = generateAccessToken(user, sessionId);
+  const refreshToken = generateRefreshToken(user, sessionId);
+
+  const { error: sessionError } = await supabase.from("sessions").insert({
+    id: sessionId,
+    user_id: user.id,
+    refresh_token_hash: hashToken(refreshToken),
+    user_agent: req.headers["user-agent"] || null,
+  });
+
+  if (sessionError) {
+    console.error("[auth/login] oturum kaydı oluşturulamadı:", sessionError);
+    return res.status(500).json({ error: "Giriş yapılamadı, tekrar deneyin" });
+  }
 
   res.json({
     accessToken,
@@ -73,19 +140,54 @@ app.post("/auth/login", async (req, res) => {
 });
 
 // Token yenile
-app.post("/auth/refresh", (req, res) => {
+app.post("/auth/refresh", async (req, res) => {
   const { refreshToken } = req.body;
   if (!refreshToken) {
     return res.status(400).json({ error: "Refresh token gerekli" });
   }
 
   const decoded = verifyToken(refreshToken);
-  if (!decoded) {
+  if (!decoded || decoded.type !== "refresh" || !decoded.sessionId) {
     return res.status(401).json({ error: "Geçersiz refresh token" });
   }
 
-  const accessToken = generateAccessToken({ id: decoded.id });
+  const { data: session, error } = await supabase
+    .from("sessions")
+    .select("id, user_id, refresh_token_hash, revoked_at")
+    .eq("id", decoded.sessionId)
+    .eq("user_id", decoded.id)
+    .single();
+
+  if (error || !session) {
+    return res.status(401).json({ error: "Oturum bulunamadı, tekrar giriş yapın" });
+  }
+
+  if (session.revoked_at) {
+    return res.status(401).json({ error: "Oturum sonlandırılmış, tekrar giriş yapın" });
+  }
+
+  if (session.refresh_token_hash !== hashToken(refreshToken)) {
+    return res.status(401).json({ error: "Geçersiz refresh token" });
+  }
+
+  await supabase
+    .from("sessions")
+    .update({ last_used_at: new Date().toISOString() })
+    .eq("id", decoded.sessionId);
+
+  const accessToken = generateAccessToken({ id: decoded.id }, decoded.sessionId);
   res.json({ accessToken });
+});
+
+// Çıkış — mevcut oturumu iptal et
+app.post("/auth/logout", authenticate, async (req, res) => {
+  const { error } = await supabase
+    .from("sessions")
+    .update({ revoked_at: new Date().toISOString() })
+    .eq("id", req.sessionId);
+
+  if (error) return res.status(500).json({ error: "Çıkış yapılamadı" });
+  res.json({ success: true });
 });
 
 // ─── Kullanıcı Yönetimi (sadece superadmin ve manager) ───────────────────
@@ -108,7 +210,6 @@ app.post(
         .json({ error: "Manager sadece worker oluşturabilir" });
     }
 
-    // Manager workspace'i yoksa worker oluşturamaz
     if (req.user.role === "manager" && !req.user.workspace_id) {
       return res.status(400).json({ error: "Önce bir workspace oluşturun" });
     }
@@ -116,7 +217,7 @@ app.post(
     const assignedWorkspaceId =
       req.user.role === "superadmin"
         ? workspace_id || null
-        : req.user.workspace_id; // Manager kendi workspace'ini atar
+        : req.user.workspace_id;
 
     const pin_hash = await hashPin(pin);
 
@@ -150,7 +251,6 @@ app.post(
       return res.status(400).json({ error: "Workspace adı gerekli" });
     }
 
-    // Davet kodu üret
     const inviteCode = Math.random().toString(36).substring(2, 8).toUpperCase();
 
     const { data: workspace, error } = await supabase
@@ -162,7 +262,6 @@ app.post(
     if (error)
       return res.status(500).json({ error: "Workspace oluşturulamadı" });
 
-    // Kullanıcıyı workspace'e bağla
     await supabase
       .from("users")
       .update({ workspace_id: workspace.id })
@@ -249,7 +348,6 @@ app.post("/register", authenticate, async (req, res) => {
     return res.status(400).json({ error: "chatId gerekli" });
   }
 
-  // Telegram'a test mesajı at
   try {
     const testUrl = `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`;
     const params = new URLSearchParams({
@@ -267,7 +365,6 @@ app.post("/register", authenticate, async (req, res) => {
     return res.status(500).json({ error: "Telegram doğrulaması başarısız" });
   }
 
-  // Doğrulama başarılı — kaydet
   await supabase
     .from("users")
     .update({ telegram_chat_id: chatId })
@@ -297,7 +394,6 @@ app.get(
   authenticate,
   authorize("superadmin", "manager"),
   async (req, res) => {
-    // Superadmin tüm kullanıcıları görür, manager sadece kendi workspace'ini
     let query = supabase
       .from("users")
       .select("id, username, role, created_at, workspace_id");
@@ -324,7 +420,6 @@ app.delete(
   async (req, res) => {
     const { id } = req.params;
 
-    // Kendini silemez
     if (id === req.user.id) {
       return res.status(400).json({ error: "Kendinizi silemezsiniz" });
     }
@@ -337,6 +432,41 @@ app.delete(
 
     if (error) return res.status(500).json({ error: "Kullanıcı silinemedi" });
 
+    res.json({ success: true });
+  },
+);
+
+// Kullanıcının oturumunu zorla kapat
+app.post(
+  "/users/:id/force-logout",
+  authenticate,
+  authorize("superadmin"),
+  async (req, res) => {
+    const { id } = req.params;
+
+    if (id === req.user.id) {
+      return res
+        .status(400)
+        .json({ error: "Kendi oturumunuzu bu şekilde kapatamazsınız" });
+    }
+
+    const { data: targetUser, error: fetchError } = await supabase
+      .from("users")
+      .select("id")
+      .eq("id", id)
+      .single();
+
+    if (fetchError || !targetUser) {
+      return res.status(404).json({ error: "Kullanıcı bulunamadı" });
+    }
+
+    const { error } = await supabase
+      .from("sessions")
+      .update({ revoked_at: new Date().toISOString() })
+      .eq("user_id", id)
+      .is("revoked_at", null);
+
+    if (error) return res.status(500).json({ error: "Oturum kapatılamadı" });
     res.json({ success: true });
   },
 );
@@ -417,7 +547,6 @@ app.post("/workspace/leave", authenticate, async (req, res) => {
     return res.status(400).json({ error: "Zaten bir workspace'de değilsiniz" });
   }
 
-  // Manager ise workspace'de başka manager var mı kontrol et
   if (req.user.role === "manager") {
     const { data: otherManagers } = await supabase
       .from("users")
@@ -549,7 +678,6 @@ app.patch("/timers/:id", authenticate, async (req, res) => {
     return res.status(400).json({ error: "Güncellenebilir alan yok" });
   }
 
-  // status running ise started_at'i sadece null ise ata — tek sorguda
   if (filtered.status === "running") {
     const { error: rpcError } = await supabase.rpc("set_started_at_if_null", {
       timer_id: id,
@@ -571,7 +699,6 @@ app.patch("/timers/:id", authenticate, async (req, res) => {
 app.delete("/timers/:id", authenticate, async (req, res) => {
   const { id } = req.params;
 
-  // Timer'ı bul
   const { data: existing, error: fetchError } = await supabase
     .from("timers")
     .select("user_id, is_shared, workspace_id, record_status")
@@ -582,7 +709,6 @@ app.delete("/timers/:id", authenticate, async (req, res) => {
     return res.status(404).json({ error: "Timer bulunamadı" });
   }
 
-  // Yetki kontrolü
   const canDelete = existing.is_shared
     ? existing.workspace_id === req.user.workspace_id
     : existing.user_id === req.user.id;
@@ -593,7 +719,6 @@ app.delete("/timers/:id", authenticate, async (req, res) => {
     });
   }
 
-  // Soft delete
   const { data: updated, error: updateError } = await supabase
     .from("timers")
     .update({ record_status: "deleted" })
@@ -603,17 +728,14 @@ app.delete("/timers/:id", authenticate, async (req, res) => {
 
   if (updateError) {
     console.error("Timer update hatası:", updateError);
-
     return res.status(500).json({
       error: "Timer silinemedi",
       details: updateError.message,
     });
   }
 
-  // Gerçekten deleted oldu mu?
   if (!updated || updated.record_status !== "deleted") {
     console.error("Timer güncellenmedi:", updated);
-
     return res.status(500).json({
       error: "Timer güncellemesi doğrulanamadı",
     });
@@ -639,9 +761,9 @@ app.get("/timers/shared", authenticate, async (req, res) => {
     .eq("record_status", "active")
     .order("created_at", { ascending: false });
 
-   if (error) {
+  if (error) {
     console.error("[/timers/shared] Supabase hatası:", error);
-    return res.status(500).json({ error: "Timer'lar alınamadı", debug: error.message, debugFull: error });
+    return res.status(500).json({ error: "Timer'lar alınamadı" });
   }
   res.json({ timers: data });
 });
@@ -678,7 +800,6 @@ app.post("/timer/start", authenticate, async (req, res) => {
   const messageText = `${name} bitti! ${paid}`;
 
   if (timer?.workspace_id) {
-    // Toplu — workspace'teki herkese gönder
     const { data: members } = await supabase
       .from("users")
       .select("telegram_chat_id")
@@ -691,7 +812,6 @@ app.post("/timer/start", authenticate, async (req, res) => {
       );
     }
   } else {
-    // Bireysel — sadece kendine gönder
     await sendTelegramMessage(user.telegram_chat_id, messageText);
   }
 });
@@ -721,7 +841,6 @@ app.get("/health", (req, res) => {
 io.on("connection", (socket) => {
   console.log("[Socket] Bağlandı:", socket.id);
 
-  // Kullanıcı workspace odasına katılır
   socket.on("join-workspace", (workspaceId) => {
     if (!workspaceId) return;
     socket.join(`workspace-${workspaceId}`);
@@ -730,10 +849,8 @@ io.on("connection", (socket) => {
     );
   });
 
-  // Timer değişikliği — sadece aynı odadakilere ilet
   socket.on("timer-event", ({ workspaceId, event, data }) => {
     if (!workspaceId) return;
-    // socket.to() → gönderen hariç odadaki herkese iletir
     socket.to(`workspace-${workspaceId}`).emit("timer-event", { event, data });
     console.log(`[Socket] workspace-${workspaceId} → ${event} yayınlandı`);
   });
