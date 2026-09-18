@@ -24,6 +24,7 @@ dotenv.config();
 
 const app = express();
 app.use(cors());
+app.set("trust proxy", 1);
 app.use(express.json());
 
 // HTTP server oluştur — Socket.io bunun üzerine kurulacak
@@ -41,9 +42,17 @@ createSuperAdminIfNotExists();
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 10,
-  message: { error: "Çok fazla deneme yapıldı, lütfen daha sonra tekrar deneyin" },
   standardHeaders: true,
   legacyHeaders: false,
+  handler: (req, res) => {
+    const resetMs = req.rateLimit?.resetTime
+      ? req.rateLimit.resetTime.getTime() - Date.now()
+      : 15 * 60 * 1000;
+    const resetMin = Math.max(1, Math.ceil(resetMs / 60000));
+    res.status(429).json({
+      error: `Çok fazla deneme yapıldı. Lütfen ${resetMin} dakika sonra tekrar deneyin.`,
+    });
+  },
 });
 
 // Kullanıcı adı bazlı: aynı kullanıcı adına 15 dakikada en fazla 5 başarısız deneme
