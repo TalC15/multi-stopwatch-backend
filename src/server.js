@@ -167,7 +167,21 @@ app.post("/auth/refresh", async (req, res) => {
     .eq("user_id", decoded.id)
     .single();
 
-  if (error || !session) {
+  if (error) {
+    // "Satır bulunamadı" → gerçekten geçersiz oturum → 401
+    // Başka türlü hata (bağlantı vb.) → geçici altyapı sorunu → 503
+    if (error.code === "PGRST116") {
+      return res
+        .status(401)
+        .json({ error: "Oturum bulunamadı, tekrar giriş yapın" });
+    }
+    console.error("[auth/refresh] Supabase hatası:", error);
+    return res
+      .status(503)
+      .json({ error: "Sunucu geçici olarak erişilemiyor" });
+  }
+
+  if (!session) {
     return res.status(401).json({ error: "Oturum bulunamadı, tekrar giriş yapın" });
   }
 
