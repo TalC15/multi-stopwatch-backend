@@ -228,10 +228,18 @@ app.post(
   authorize("superadmin", "manager"),
   async (req, res) => {
     const { username, pin, role, workspace_id } = req.body;
-
+    if(username.length>25 || pin.length>25) return res.status(400).json({error:"çok uzun isim veya PIN"})
     if (!username || !pin || !role) {
       return res.status(400).json({ error: "Eksik parametre" });
     }
+
+    const usernameController = await supabase
+    .from("users")
+    .select("username")
+    .eq("username",username)
+    .single()
+
+    if(usernameController.data) return res.status(400).json({error:"Bu isim zaten mevcut"})
 
     if (req.user.role === "manager" && role !== "worker") {
       return res
