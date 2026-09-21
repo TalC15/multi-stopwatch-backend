@@ -95,7 +95,8 @@ app.post("/auth/login", loginLimiter, async (req, res) => {
 
   if (isLockedOut(username)) {
     return res.status(429).json({
-      error: "Çok fazla başarısız deneme. Lütfen 15 dakika sonra tekrar deneyin.",
+      error:
+        "Çok fazla başarısız deneme. Lütfen 15 dakika sonra tekrar deneyin.",
     });
   }
 
@@ -176,20 +177,22 @@ app.post("/auth/refresh", async (req, res) => {
         .json({ error: "Oturum bulunamadı, tekrar giriş yapın" });
     }
     console.error("[auth/refresh] Supabase hatası:", error);
-    return res
-      .status(503)
-      .json({ error: "Sunucu geçici olarak erişilemiyor" });
+    return res.status(503).json({ error: "Sunucu geçici olarak erişilemiyor" });
   }
 
   if (!session) {
-    return res.status(401).json({ error: "Oturum bulunamadı, tekrar giriş yapın" });
+    return res
+      .status(401)
+      .json({ error: "Oturum bulunamadı, tekrar giriş yapın" });
   }
 
   if (session.revoked_at) {
-    return res.status(401).json({ error: "Oturum sonlandırılmış, tekrar giriş yapın" });
+    return res
+      .status(401)
+      .json({ error: "Oturum sonlandırılmış, tekrar giriş yapın" });
   }
 
-   if (session.refresh_token_hash !== hashToken(refreshToken)) {
+  if (session.refresh_token_hash !== hashToken(refreshToken)) {
     return res.status(401).json({ error: "Geçersiz refresh token" });
   }
 
@@ -198,7 +201,10 @@ app.post("/auth/refresh", async (req, res) => {
     .update({ last_used_at: new Date().toISOString() })
     .eq("id", decoded.sessionId);
 
-  const accessToken = generateAccessToken({ id: decoded.id }, decoded.sessionId);
+  const accessToken = generateAccessToken(
+    { id: decoded.id },
+    decoded.sessionId,
+  );
   res.json({ accessToken });
 });
 
@@ -255,7 +261,7 @@ app.post(
 
     res.json({
       success: true,
-      user: { id: data.id, username: data.username, role: data.role},
+      user: { id: data.id, username: data.username, role: data.role },
     });
   },
 );
@@ -337,7 +343,10 @@ app.get("/workspace", authenticate, async (req, res) => {
 });
 
 // Shared mode aç/kapat (sadece manager/superadmin)
-app.post("/workspace/toggle-shared",authenticate,authorize("manager", "superadmin"),
+app.post(
+  "/workspace/toggle-shared",
+  authenticate,
+  authorize("manager", "superadmin"),
   async (req, res) => {
     if (!req.user.workspace_id) {
       return res.status(400).json({ error: "Bir workspace'de değilsiniz" });
@@ -375,7 +384,7 @@ app.post("/register", authenticate, async (req, res) => {
     const testUrl = `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`;
     const params = new URLSearchParams({
       chat_id: chatId,
-      text: "KeepTime bildirimleri aktifleştirildi! ✓",
+      text: "KeepTimer bildirimleri aktifleştirildi! ✓",
     });
 
     const telegramRes = await fetch(testUrl + "?" + params.toString());
@@ -812,32 +821,40 @@ app.post("/timer/start", authenticate, async (req, res) => {
     return res.status(400).json({ error: "Telegram kaydı yok" });
   }
 
-  scheduleTimer(req.user.id, timerId, timerName, endsAt, async (uid, tid, name) => {
-  const { data: timer } = await supabase
-    .from("timers")
-    .select("is_pay, workspace_id")
-    .eq("id", tid)
-    .single();
+  scheduleTimer(
+    req.user.id,
+    timerId,
+    timerName,
+    endsAt,
+    async (uid, tid, name) => {
+      const { data: timer } = await supabase
+        .from("timers")
+        .select("is_pay, workspace_id")
+        .eq("id", tid)
+        .single();
 
-  const paid = timer?.is_pay ? "ODENDI" : "ODENMEDI";
-  const messageText = `${name} bitti! ${paid}`;
+      const paid = timer?.is_pay ? "ODENDI" : "ODENMEDI";
+      const messageText = `${name} bitti! ${paid}`;
 
-  if (timer?.workspace_id) {
-    const { data: members } = await supabase
-      .from("users")
-      .select("telegram_chat_id")
-      .eq("workspace_id", timer.workspace_id)
-      .not("telegram_chat_id", "is", null);
+      if (timer?.workspace_id) {
+        const { data: members } = await supabase
+          .from("users")
+          .select("telegram_chat_id")
+          .eq("workspace_id", timer.workspace_id)
+          .not("telegram_chat_id", "is", null);
 
-    if (members && members.length > 0) {
-      await Promise.all(
-        members.map((m) => sendTelegramMessage(m.telegram_chat_id, messageText))
-      );
-    }
-  } else {
-    await sendTelegramMessage(user.telegram_chat_id, messageText);
-  }
-});
+        if (members && members.length > 0) {
+          await Promise.all(
+            members.map((m) =>
+              sendTelegramMessage(m.telegram_chat_id, messageText),
+            ),
+          );
+        }
+      } else {
+        await sendTelegramMessage(user.telegram_chat_id, messageText);
+      }
+    },
+  );
 
   res.json({ success: true });
 });
@@ -852,6 +869,22 @@ app.post("/timer/cancel", authenticate, (req, res) => {
 
   cancelTimer(timerId);
   res.json({ success: true });
+});
+
+// telegram bağlantısını kaldır/chatID'yi sil
+app.update("/telegram/cancel", authenticate, async (req, res) => {
+  try {
+    const { user_id } = req.body;
+    const { error } = await supabase
+      .from("users")
+      .update({ telegram_chat_id: null })
+      .eq("id", user_id);
+    if (error) {
+      return res.status(500).json({ error: "telegram chatID silinemedi." });
+    }
+  } catch (err) {
+    console.log(err);
+  }
 });
 
 // ─── Sağlık kontrolü ──────────────────────────────────────────────────────
