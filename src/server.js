@@ -818,7 +818,7 @@ app.post("/timer/start", authenticate, async (req, res) => {
     .single();
 
   if (!user?.telegram_chat_id) {
-    return 
+    return;
   }
 
   scheduleTimer(
@@ -882,9 +882,28 @@ app.patch("/telegram/cancel", authenticate, async (req, res) => {
     if (error) {
       return res.status(500).json({ error: "telegram bağlantısı kesilemedi." });
     }
-    return res.status(200).json({success: "telegram bağlantısı kesildi."})
+    return res.status(200).json({ success: "telegram bağlantısı kesildi." });
   } catch (err) {
     console.log(err);
+  }
+});
+
+// telegram chatID çekme
+app.post("/telegram/control", authenticate, async (req, res) => {
+  try {
+    const { user_id } = req.body;
+    const response = await supabase
+      .from(users)
+      .select("telegram_chat_id")
+      .eq("id", user_id)
+      .single();
+    if (!response || response === null) {
+      return res.json({ success: false });
+    } else {
+      return res.json({ success: true });
+    }
+  } catch (err) {
+    console.log("telegram get işlemi hatası:", err);
   }
 });
 
