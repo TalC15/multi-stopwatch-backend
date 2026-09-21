@@ -872,7 +872,7 @@ app.post("/timer/cancel", authenticate, (req, res) => {
 });
 
 // telegram bağlantısını kaldır/chatID'yi sil
-app.put("/telegram/cancel", authenticate, async (req, res) => {
+app.patch("/telegram/cancel", authenticate, async (req, res) => {
   try {
     const { user_id } = req.body;
     const { error } = await supabase
