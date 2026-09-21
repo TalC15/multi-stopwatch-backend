@@ -892,18 +892,25 @@ app.patch("/telegram/cancel", authenticate, async (req, res) => {
 app.post("/telegram/control", authenticate, async (req, res) => {
   try {
     const { user_id } = req.body;
-    const response = await supabase
+
+    const { data, error } = await supabase
       .from(users)
       .select("telegram_chat_id")
       .eq("id", user_id)
       .single();
-    if (!response || response === null) {
-      return res.json({ success: false });
-    } else {
-      return res.json({ success: true });
+
+    if (error) {
+      console.log("telegram control hatası:", error);
+      return res.status(500).json({ success: false });
     }
+
+    return res.json({
+      success: true,
+      connected: !!data.telegram_chat_id,
+    });
   } catch (err) {
     console.log("telegram get işlemi hatası:", err);
+    return res.status(500).json({ success: false });
   }
 });
 
