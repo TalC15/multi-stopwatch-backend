@@ -882,7 +882,7 @@ app.patch("/telegram/cancel", authenticate, async (req, res) => {
     if (error) {
       return res.status(500).json({ error: "telegram bağlantısı kesilemedi." });
     }
-    return res.status(200).json({success:"telegram bağlantısı kesildi."})
+    return res.json({success: true})
   } catch (err) {
     console.log(err);
   }
