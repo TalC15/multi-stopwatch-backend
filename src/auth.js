@@ -21,19 +21,19 @@ export function hashToken(token) {
   return crypto.createHash('sha256').update(token).digest('hex');
 }
 
-// Access token — id + sessionId
+// Access token — id + sessionId + type (refresh token ile karışmasın diye)
 export function generateAccessToken(user, sessionId) {
   return jwt.sign(
-    { id: user.id, sessionId },
+    { id: user.id, sessionId, type: 'access' },
     JWT_SECRET,
     { expiresIn: '15m' }
   );
 }
 
-// Refresh token — id + sessionId
+// Refresh token — id + sessionId + type
 export function generateRefreshToken(user, sessionId) {
   return jwt.sign(
-    { id: user.id, sessionId },
+    { id: user.id, sessionId, type: 'refresh' },
     JWT_SECRET,
     { expiresIn: '30d' }
   );
@@ -59,7 +59,7 @@ export async function authenticate(req, res, next) {
   const token = authHeader.split(' ')[1];
   const decoded = verifyToken(token);
 
-  if (!decoded) {
+  if (!decoded || decoded.type !== 'access') {
     return res.status(401).json({ error: 'Geçersiz veya süresi dolmuş token' });
   }
 
@@ -70,11 +70,12 @@ export async function authenticate(req, res, next) {
         .select('id, username, role, workspace_id')
         .eq('id', decoded.id)
         .single(),
-      decoded.sessionId
+       decoded.sessionId
         ? supabase
             .from('sessions')
             .select('id, revoked_at')
             .eq('id', decoded.sessionId)
+            .eq('user_id', decoded.id)
             .single()
         : Promise.resolve({ data: null, error: { code: 'NO_SESSION_ID' } }),
     ]);

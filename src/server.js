@@ -156,9 +156,7 @@ app.post("/auth/refresh", async (req, res) => {
   }
 
   const decoded = verifyToken(refreshToken);
-  console.log("[auth/refresh DEBUG] decoded:", JSON.stringify(decoded));
   if (!decoded || decoded.type !== "refresh" || !decoded.sessionId) {
-    console.log("[auth/refresh DEBUG] ilk kontrolde reddedildi — decoded null mu:", !decoded, "type:", decoded?.type, "sessionId var mı:", !!decoded?.sessionId);
     return res.status(401).json({ error: "Geçersiz refresh token" });
   }
 
@@ -192,7 +190,6 @@ app.post("/auth/refresh", async (req, res) => {
   }
 
    if (session.refresh_token_hash !== hashToken(refreshToken)) {
-    console.log("[auth/refresh DEBUG] hash uyuşmazlığı — DB'deki:", session.refresh_token_hash, "gelen:", hashToken(refreshToken));
     return res.status(401).json({ error: "Geçersiz refresh token" });
   }
 
