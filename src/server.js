@@ -818,7 +818,7 @@ app.post("/timer/start", authenticate, async (req, res) => {
     .single();
 
   if (!user?.telegram_chat_id) {
-    return res.status(400).json({ error: "Telegram kaydı yok" });
+    return 
   }
 
   scheduleTimer(
@@ -882,7 +882,7 @@ app.patch("/telegram/cancel", authenticate, async (req, res) => {
     if (error) {
       return res.status(500).json({ error: "telegram bağlantısı kesilemedi." });
     }
-    return res.json({success: true})
+    return res.status(200).json({success: "telegram bağlantısı kesildi."})
   } catch (err) {
     console.log(err);
   }
