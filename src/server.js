@@ -894,7 +894,7 @@ app.post("/telegram/control", authenticate, async (req, res) => {
     const { user_id } = req.body;
 
     const { data, error } = await supabase
-      .from(users)
+      .from("users")
       .select("telegram_chat_id")
       .eq("id", user_id)
       .single();
