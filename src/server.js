@@ -880,8 +880,9 @@ app.patch("/telegram/cancel", authenticate, async (req, res) => {
       .update({ telegram_chat_id: null })
       .eq("id", user_id);
     if (error) {
-      return res.status(500).json({ error: "telegram chatID silinemedi." });
+      return res.status(500).json({ error: "telegram bağlantısı kesilemedi." });
     }
+    return res.status(200).json({success:"telegram bağlantısı kesildi."})
   } catch (err) {
     console.log(err);
   }
