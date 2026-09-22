@@ -930,24 +930,28 @@ app.get("/health", (req, res) => {
 // ─── Socket.io — Ortak Ekran ──────────────────────────────────────────────
 
 io.on("connection", (socket) => {
-  console.log("[Socket] Bağlandı:", socket.id);
+  console.log("[Socket] Bağlandı:", socket.id, "zaman:", new Date().toISOString());
 
   socket.on("join-workspace", (workspaceId) => {
     if (!workspaceId) return;
     socket.join(`workspace-${workspaceId}`);
     console.log(
-      `[Socket] ${socket.id} → workspace-${workspaceId} odasına katıldı`,
+      `[Socket] ${socket.id} → workspace-${workspaceId} odasına katıldı, zaman:`,
+      new Date().toISOString(),
     );
   });
 
   socket.on("timer-event", ({ workspaceId, event, data }) => {
     if (!workspaceId) return;
     socket.to(`workspace-${workspaceId}`).emit("timer-event", { event, data });
-    console.log(`[Socket] workspace-${workspaceId} → ${event} yayınlandı`);
+    console.log(
+      `[Socket] workspace-${workspaceId} → ${event} yayınlandı, zaman:`,
+      new Date().toISOString(),
+    );
   });
 
-  socket.on("disconnect", () => {
-    console.log("[Socket] Ayrıldı:", socket.id);
+  socket.on("disconnect", (reason) => {
+    console.log("[Socket] Ayrıldı:", socket.id, "sebep:", reason, "zaman:", new Date().toISOString());
   });
 });
 
