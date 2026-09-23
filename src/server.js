@@ -228,18 +228,20 @@ app.post(
   authorize("superadmin", "manager"),
   async (req, res) => {
     const { username, pin, role, workspace_id } = req.body;
-    if(username.length>25 || pin.length>25) return res.status(400).json({error:"çok uzun isim veya PIN"})
+    if (username.length > 25 || pin.length > 25)
+      return res.status(400).json({ error: "çok uzun isim veya PIN" });
     if (!username || !pin || !role) {
       return res.status(400).json({ error: "Eksik parametre" });
     }
 
     const usernameController = await supabase
-    .from("users")
-    .select("username")
-    .eq("username",username)
-    .single()
+      .from("users")
+      .select("username")
+      .eq("username", username)
+      .single();
 
-    if(usernameController.data) return res.status(400).json({error:"Bu isim zaten mevcut"})
+    if (usernameController.data)
+      return res.status(400).json({ error: "Bu isim zaten mevcut" });
 
     if (req.user.role === "manager" && role !== "worker") {
       return res
@@ -754,7 +756,7 @@ app.patch("/timers/:id", authenticate, async (req, res) => {
   const { data: existing, error: fetchError } = await supabase
     .from("timers")
     .select(
-      "id, user_id, workspace_id, is_shared, record_status, status, paused_count",
+      "id, user_id, workspace_id, is_shared, record_status, status, paused_count,type",
     )
     .eq("id", id)
     .eq("record_status", "active")
@@ -785,6 +787,28 @@ app.patch("/timers/:id", authenticate, async (req, res) => {
     return res.status(403).json({
       error: "Bu timer'ı güncelleme yetkiniz yok",
     });
+  }
+
+  // Count-Up hedefe ulaştığında timer tamamlanmış sayılmaz.
+  // Eski client/APK "completed" gönderse bile DB'deki running state'i bozma.
+  if (existing.type === "up" && filtered.status === "completed") {
+    console.warn(
+      `[PATCH /timers/:id] Count-Up completed isteği yok sayıldı: ${id}`,
+    );
+
+    delete filtered.status;
+    delete filtered.ended_at;
+    delete filtered.duration_ms;
+
+    // Eski client sadece completion bilgisi gönderdiyse
+    // yapılacak gerçek bir DB değişikliği kalmamıştır.
+    if (Object.keys(filtered).length === 0) {
+      return res.json({
+        success: true,
+        ignored: true,
+        pausedCount: Number(existing.paused_count || 0),
+      });
+    }
   }
 
   // Shared timer'da paused_count değerine client karar veremez.
@@ -852,6 +876,13 @@ app.patch("/timers/:id", authenticate, async (req, res) => {
 
       // Her cihaz DB'deki gerçek değeri alır.
       socketData.pausedCount = Number(updated.paused_count || 0);
+    }
+
+    // Countdown gerçekten tamamlandıysa bütün workspace'e anında bildir.
+    if (existing.type === "down" && filtered.status === "completed") {
+      socketData.status = "expired";
+      socketData.endsAt = null;
+      socketData.reachedTarget = true;
     }
 
     if (filtered.is_pay !== undefined) {
@@ -1090,7 +1121,12 @@ app.get("/health", (req, res) => {
 // ─── Socket.io — Ortak Ekran ──────────────────────────────────────────────
 
 io.on("connection", (socket) => {
-  console.log("[Socket] Bağlandı:", socket.id, "zaman:", new Date().toISOString());
+  console.log(
+    "[Socket] Bağlandı:",
+    socket.id,
+    "zaman:",
+    new Date().toISOString(),
+  );
 
   socket.on("join-workspace", (workspaceId) => {
     if (!workspaceId) return;
@@ -1111,7 +1147,14 @@ io.on("connection", (socket) => {
   });
 
   socket.on("disconnect", (reason) => {
-    console.log("[Socket] Ayrıldı:", socket.id, "sebep:", reason, "zaman:", new Date().toISOString());
+    console.log(
+      "[Socket] Ayrıldı:",
+      socket.id,
+      "sebep:",
+      reason,
+      "zaman:",
+      new Date().toISOString(),
+    );
   });
 });
 
