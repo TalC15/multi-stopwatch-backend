@@ -1209,11 +1209,14 @@ io.use(async (socket, next) => {
   // Eski APK'lar henüz token göndermiyor.
   // Şimdilik bağlantıyı engellemiyoruz.
   if (!token) {
-    socket.data.authenticated = false;
-    socket.data.user = null;
-    socket.data.sessionId = null;
+    const error = new Error("unauthorized");
 
-    return next();
+    error.data = {
+      status: 401,
+      message: "Token gerekli",
+    };
+
+    return next(error);
   }
 
   const result = await validateAccessToken(token);
@@ -1239,21 +1242,37 @@ io.use(async (socket, next) => {
 // ─── Socket.io — Ortak Ekran ──────────────────────────────────────────────
 
 io.on("connection", (socket) => {
+  const user = socket.data.user;
+  const sessionId = socket.data.sessionId;
+
+  // Kullanıcıya özel oda.
+  // İleride force-logout / session yönetiminde işimize yarayacak.
+  socket.join(`user-${user.id}`);
+
+  // Bu login session'ına özel oda.
+  socket.join(`session-${sessionId}`);
+
+  // Workspace'i client seçmez.
+  // DB'den doğrulanmış kullanıcı kaydı belirler.
+  if (user.workspace_id) {
+    socket.join(`workspace-${user.workspace_id}`);
+  }
+
+  console.log(
+    "[Socket] Authenticated connection:",
+    socket.id,
+    "user:",
+    user.username,
+    "workspace:",
+    user.workspace_id ?? null,
+  );
+
   console.log(
     "[Socket] Bağlandı:",
     socket.id,
     "zaman:",
     new Date().toISOString(),
   );
-
-  socket.on("join-workspace", (workspaceId) => {
-    if (!workspaceId) return;
-    socket.join(`workspace-${workspaceId}`);
-    console.log(
-      `[Socket] ${socket.id} → workspace-${workspaceId} odasına katıldı, zaman:`,
-      new Date().toISOString(),
-    );
-  });
 
   socket.on("disconnect", (reason) => {
     console.log(
