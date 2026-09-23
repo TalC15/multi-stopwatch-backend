@@ -1242,15 +1242,6 @@ io.on("connection", (socket) => {
     );
   });
 
-  socket.on("timer-event", ({ workspaceId, event, data }) => {
-    if (!workspaceId) return;
-    socket.to(`workspace-${workspaceId}`).emit("timer-event", { event, data });
-    console.log(
-      `[Socket] workspace-${workspaceId} → ${event} yayınlandı, zaman:`,
-      new Date().toISOString(),
-    );
-  });
-
   socket.on("disconnect", (reason) => {
     console.log(
       "[Socket] Ayrıldı:",
