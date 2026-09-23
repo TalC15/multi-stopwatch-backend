@@ -719,7 +719,7 @@ app.patch("/timers/:id", authenticate, async (req, res) => {
     return res.status(400).json({ error: "Güncellenebilir alan yok" });
   }
 
-  // Önce timer'ı bul. Yetki kontrolü yapılmadan hiçbir değişiklik yapma.
+  // Timer'ı önce bul.
   const { data: existing, error: fetchError } = await supabase
     .from("timers")
     .select("id, user_id, workspace_id, is_shared, record_status")
@@ -736,10 +736,7 @@ app.patch("/timers/:id", authenticate, async (req, res) => {
     return res.status(404).json({ error: "Timer bulunamadı" });
   }
 
-  // Yetki kuralları:
-  // - Superadmin tüm timer'ları güncelleyebilir.
-  // - Shared timer'ı yalnız aynı workspace'teki kullanıcılar güncelleyebilir.
-  // - Personal timer'ı yalnız sahibi güncelleyebilir.
+  // Yetki kontrolü.
   let canUpdate = false;
 
   if (req.user.role === "superadmin") {
@@ -758,8 +755,7 @@ app.patch("/timers/:id", authenticate, async (req, res) => {
     });
   }
 
-  // started_at ilk kez running olduğunda kaydedilsin.
-  // Bu RPC artık yalnızca yetki kontrolünden SONRA çalışıyor.
+  // started_at sadece ilk kez başlatılırken yazılır.
   if (filtered.status === "running") {
     const { error: rpcError } = await supabase.rpc("set_started_at_if_null", {
       timer_id: id,
@@ -772,6 +768,7 @@ app.patch("/timers/:id", authenticate, async (req, res) => {
     }
   }
 
+  // Önce DB.
   const { data: updated, error: updateError } = await supabase
     .from("timers")
     .update(filtered)
@@ -791,6 +788,37 @@ app.patch("/timers/:id", authenticate, async (req, res) => {
     return res.status(500).json({
       error: "Timer güncellenemedi",
     });
+  }
+
+  // Shared timer ise ancak DB başarıyla güncellendikten sonra
+  // workspace'teki cihazlara socket event'i gönder.
+  if (existing.is_shared && existing.workspace_id) {
+    const socketData = { id };
+
+    // Bu aşamada yalnız kullanıcı tarafından yapılan
+    // start/pause değişikliklerini yayınlıyoruz.
+    if (filtered.status === "running" || filtered.status === "paused") {
+      socketData.status = filtered.status;
+      socketData.endsAt = filtered.ends_at ?? null;
+      socketData.accumulatedTimeAtStart = filtered.accumulated_ms ?? 0;
+    }
+
+    // Ödeme değişikliği.
+    if (filtered.is_pay !== undefined) {
+      socketData.isPay = filtered.is_pay;
+    }
+
+    // Sadece gerçekten yayınlanacak bir değişiklik varsa gönder.
+    if (Object.keys(socketData).length > 1) {
+      io.to(`workspace-${existing.workspace_id}`).emit("timer-event", {
+        event: "updated",
+        data: socketData,
+      });
+
+      console.log(
+        `[Socket] workspace-${existing.workspace_id} → updated yayınlandı (DB onaylı)`,
+      );
+    }
   }
 
   res.json({ success: true });
