@@ -691,7 +691,38 @@ app.post("/timers", authenticate, async (req, res) => {
     .select()
     .single();
 
-  if (error) return res.status(500).json({ error: "Timer oluşturulamadı" });
+  if (error) {
+    console.error("[POST /timers] Timer oluşturma hatası:", error);
+    return res.status(500).json({ error: "Timer oluşturulamadı" });
+  }
+
+  // Shared timer ancak DB'ye başarıyla yazıldıktan sonra workspace'e yayınlanır.
+  if (data.is_shared && data.workspace_id) {
+    const targetMs = Number(data.target_minutes || 0) * 60 * 1000;
+
+    io.to(`workspace-${data.workspace_id}`).emit("timer-event", {
+      event: "created",
+      data: {
+        id: data.id,
+        name: data.name,
+        targetMinutes: Number(data.target_minutes),
+        type: data.type,
+        isPay: Boolean(data.is_pay),
+        isShared: true,
+        status: data.status,
+        startTime: null,
+        accumulatedTime: Number(data.accumulated_ms || 0),
+        elapsed: Number(data.accumulated_ms || 0),
+        remaining: data.type === "down" ? targetMs : null,
+        reachedTarget: false,
+      },
+    });
+
+    console.log(
+      `[Socket] workspace-${data.workspace_id} → created yayınlandı (DB onaylı)`,
+    );
+  }
+
   res.json({ success: true, timer: data });
 });
 
@@ -755,7 +786,7 @@ app.patch("/timers/:id", authenticate, async (req, res) => {
     });
   }
 
-  // started_at sadece ilk kez başlatılırken yazılır.
+  // started_at yalnızca ilk kez running olduğunda yazılır.
   if (filtered.status === "running") {
     const { error: rpcError } = await supabase.rpc("set_started_at_if_null", {
       timer_id: id,
@@ -768,7 +799,7 @@ app.patch("/timers/:id", authenticate, async (req, res) => {
     }
   }
 
-  // Önce DB.
+  // Önce veritabanını güncelle.
   const { data: updated, error: updateError } = await supabase
     .from("timers")
     .update(filtered)
@@ -790,25 +821,23 @@ app.patch("/timers/:id", authenticate, async (req, res) => {
     });
   }
 
-  // Shared timer ise ancak DB başarıyla güncellendikten sonra
+  // Shared timer ise yalnız DB başarılı olduktan sonra
   // workspace'teki cihazlara socket event'i gönder.
   if (existing.is_shared && existing.workspace_id) {
     const socketData = { id };
 
-    // Bu aşamada yalnız kullanıcı tarafından yapılan
-    // start/pause değişikliklerini yayınlıyoruz.
+    // Start / Pause
     if (filtered.status === "running" || filtered.status === "paused") {
       socketData.status = filtered.status;
       socketData.endsAt = filtered.ends_at ?? null;
       socketData.accumulatedTimeAtStart = filtered.accumulated_ms ?? 0;
     }
 
-    // Ödeme değişikliği.
+    // Ödendi / Ödenmedi
     if (filtered.is_pay !== undefined) {
       socketData.isPay = filtered.is_pay;
     }
 
-    // Sadece gerçekten yayınlanacak bir değişiklik varsa gönder.
     if (Object.keys(socketData).length > 1) {
       io.to(`workspace-${existing.workspace_id}`).emit("timer-event", {
         event: "updated",
@@ -832,15 +861,19 @@ app.delete("/timers/:id", authenticate, async (req, res) => {
     .from("timers")
     .select("user_id, is_shared, workspace_id, record_status")
     .eq("id", id)
+    .eq("record_status", "active")
     .single();
 
   if (fetchError || !existing) {
     return res.status(404).json({ error: "Timer bulunamadı" });
   }
 
-  const canDelete = existing.is_shared
-    ? existing.workspace_id === req.user.workspace_id
-    : existing.user_id === req.user.id;
+  const canDelete =
+    req.user.role === "superadmin" ||
+    (existing.is_shared
+      ? Boolean(existing.workspace_id) &&
+        existing.workspace_id === req.user.workspace_id
+      : existing.user_id === req.user.id);
 
   if (!canDelete) {
     return res.status(403).json({
@@ -852,11 +885,13 @@ app.delete("/timers/:id", authenticate, async (req, res) => {
     .from("timers")
     .update({ record_status: "deleted" })
     .eq("id", id)
+    .eq("record_status", "active")
     .select("id, record_status")
     .single();
 
   if (updateError) {
-    console.error("Timer update hatası:", updateError);
+    console.error("[DELETE /timers/:id] Timer update hatası:", updateError);
+
     return res.status(500).json({
       error: "Timer silinemedi",
       details: updateError.message,
@@ -864,10 +899,23 @@ app.delete("/timers/:id", authenticate, async (req, res) => {
   }
 
   if (!updated || updated.record_status !== "deleted") {
-    console.error("Timer güncellenmedi:", updated);
+    console.error("[DELETE /timers/:id] Timer güncellenmedi:", updated);
+
     return res.status(500).json({
       error: "Timer güncellemesi doğrulanamadı",
     });
+  }
+
+  // Shared timer ancak soft-delete DB'de doğrulandıktan sonra yayınlanır.
+  if (existing.is_shared && existing.workspace_id) {
+    io.to(`workspace-${existing.workspace_id}`).emit("timer-event", {
+      event: "deleted",
+      data: { id },
+    });
+
+    console.log(
+      `[Socket] workspace-${existing.workspace_id} → deleted yayınlandı (DB onaylı)`,
+    );
   }
 
   res.json({
