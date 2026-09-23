@@ -1001,61 +1001,166 @@ app.get("/timers/shared", authenticate, async (req, res) => {
 
 // ─── Timer Routes ─────────────────────────────────────────────────────────
 
-// Timer başlat
+// Timer başlat - Telegram bildirimi planla
 app.post("/timer/start", authenticate, async (req, res) => {
   const { timerId, timerName, endsAt } = req.body;
 
-  console.log(req.body);
   if (!timerId || !timerName || !endsAt) {
     return res.status(400).json({ error: "Eksik parametre" });
   }
 
-  const { data: user } = await supabase
-    .from("users")
-    .select("telegram_chat_id, workspace_id")
-    .eq("id", req.user.id)
+  const endTime = Number(endsAt);
+
+  if (!Number.isFinite(endTime)) {
+    return res.status(400).json({ error: "Geçersiz endsAt" });
+  }
+
+  // Timer'ı DB'den bul.
+  const { data: existing, error: timerError } = await supabase
+    .from("timers")
+    .select(
+      "id, user_id, workspace_id, is_shared, record_status",
+    )
+    .eq("id", timerId)
+    .eq("record_status", "active")
     .single();
 
-  if (!user?.telegram_chat_id) {
-    return;
+  if (timerError || !existing) {
+    if (timerError?.code !== "PGRST116") {
+      console.error(
+        "[POST /timer/start] Timer okuma hatası:",
+        timerError,
+      );
+
+      return res.status(500).json({
+        error: "Timer okunamadı",
+      });
+    }
+
+    return res.status(404).json({
+      error: "Timer bulunamadı",
+    });
+  }
+
+  // Timer kontrolündeki yetki kuralıyla aynı:
+  // - Superadmin her yerde
+  // - Shared timer: aynı workspace
+  // - Personal timer: yalnız sahibi
+  let canStart = false;
+
+  if (req.user.role === "superadmin") {
+    canStart = true;
+  } else if (existing.is_shared) {
+    canStart =
+      Boolean(existing.workspace_id) &&
+      existing.workspace_id === req.user.workspace_id;
+  } else {
+    canStart = existing.user_id === req.user.id;
+  }
+
+  if (!canStart) {
+    return res.status(403).json({
+      error: "Bu timer için bildirim planlama yetkiniz yok",
+    });
   }
 
   scheduleTimer(
     req.user.id,
     timerId,
     timerName,
-    endsAt,
-    async (uid, tid, name) => {
-      const { data: timer } = await supabase
+    endTime,
+    async (_uid, tid, name) => {
+      // Bildirim zamanı geldiğinde timer'ın GÜNCEL halini tekrar oku.
+      const { data: timer, error } = await supabase
         .from("timers")
-        .select("is_pay, workspace_id")
+        .select(
+          "user_id, is_pay, is_shared, workspace_id, record_status",
+        )
         .eq("id", tid)
         .single();
 
-      const paid = timer?.is_pay ? "ODENDI" : "ODENMEDI";
-      const messageText = `${name} bitti! ${paid}`;
+      // Timer artık yoksa/silinmişse bildirim gönderme.
+      if (
+        error ||
+        !timer ||
+        timer.record_status !== "active"
+      ) {
+        return;
+      }
 
-      if (timer?.workspace_id) {
-        const { data: members } = await supabase
-          .from("users")
-          .select("telegram_chat_id")
-          .eq("workspace_id", timer.workspace_id)
-          .not("telegram_chat_id", "is", null);
+      const paid = timer.is_pay
+        ? "ODENDI"
+        : "ODENMEDI";
 
-        if (members && members.length > 0) {
+      const messageText =
+        `${name} bitti! ${paid}`;
+
+      // Shared timer:
+      // Telegram bağlı tüm workspace üyelerine gönder.
+      if (timer.is_shared && timer.workspace_id) {
+        const { data: members, error: membersError } =
+          await supabase
+            .from("users")
+            .select("telegram_chat_id")
+            .eq("workspace_id", timer.workspace_id)
+            .not("telegram_chat_id", "is", null);
+
+        if (membersError) {
+          console.error(
+            "[POST /timer/start] Workspace Telegram kullanıcıları okunamadı:",
+            membersError,
+          );
+          return;
+        }
+
+        if (members?.length) {
           await Promise.all(
-            members.map((m) =>
-              sendTelegramMessage(m.telegram_chat_id, messageText),
+            members.map((member) =>
+              sendTelegramMessage(
+                member.telegram_chat_id,
+                messageText,
+              ),
             ),
           );
         }
-      } else {
-        await sendTelegramMessage(user.telegram_chat_id, messageText);
+
+        return;
       }
+
+      // Personal timer:
+      // Yalnız timer sahibine Telegram gönder.
+      const { data: owner, error: ownerError } =
+        await supabase
+          .from("users")
+          .select("telegram_chat_id")
+          .eq("id", timer.user_id)
+          .single();
+
+      if (ownerError) {
+        console.error(
+          "[POST /timer/start] Timer sahibi okunamadı:",
+          ownerError,
+        );
+        return;
+      }
+
+      // Telegram bağlı değilse bu tamamen normal.
+      if (!owner?.telegram_chat_id) {
+        return;
+      }
+
+      await sendTelegramMessage(
+        owner.telegram_chat_id,
+        messageText,
+      );
     },
   );
 
-  res.json({ success: true });
+  // Telegram bağlı olmasa bile HTTP isteği düzgün kapanır.
+  res.json({
+    success: true,
+    scheduled: true,
+  });
 });
 
 // Timer iptal
