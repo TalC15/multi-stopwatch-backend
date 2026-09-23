@@ -17,6 +17,7 @@ import {
   generateRefreshToken,
   verifyToken,
   hashToken,
+  validateAccessToken,
 } from "./auth.js";
 import supabase from "./db.js";
 
@@ -1018,19 +1019,14 @@ app.post("/timer/start", authenticate, async (req, res) => {
   // Timer'ı DB'den bul.
   const { data: existing, error: timerError } = await supabase
     .from("timers")
-    .select(
-      "id, user_id, workspace_id, is_shared, record_status",
-    )
+    .select("id, user_id, workspace_id, is_shared, record_status")
     .eq("id", timerId)
     .eq("record_status", "active")
     .single();
 
   if (timerError || !existing) {
     if (timerError?.code !== "PGRST116") {
-      console.error(
-        "[POST /timer/start] Timer okuma hatası:",
-        timerError,
-      );
+      console.error("[POST /timer/start] Timer okuma hatası:", timerError);
 
       return res.status(500).json({
         error: "Timer okunamadı",
@@ -1073,37 +1069,27 @@ app.post("/timer/start", authenticate, async (req, res) => {
       // Bildirim zamanı geldiğinde timer'ın GÜNCEL halini tekrar oku.
       const { data: timer, error } = await supabase
         .from("timers")
-        .select(
-          "user_id, is_pay, is_shared, workspace_id, record_status",
-        )
+        .select("user_id, is_pay, is_shared, workspace_id, record_status")
         .eq("id", tid)
         .single();
 
       // Timer artık yoksa/silinmişse bildirim gönderme.
-      if (
-        error ||
-        !timer ||
-        timer.record_status !== "active"
-      ) {
+      if (error || !timer || timer.record_status !== "active") {
         return;
       }
 
-      const paid = timer.is_pay
-        ? "ODENDI"
-        : "ODENMEDI";
+      const paid = timer.is_pay ? "ODENDI" : "ODENMEDI";
 
-      const messageText =
-        `${name} bitti! ${paid}`;
+      const messageText = `${name} bitti! ${paid}`;
 
       // Shared timer:
       // Telegram bağlı tüm workspace üyelerine gönder.
       if (timer.is_shared && timer.workspace_id) {
-        const { data: members, error: membersError } =
-          await supabase
-            .from("users")
-            .select("telegram_chat_id")
-            .eq("workspace_id", timer.workspace_id)
-            .not("telegram_chat_id", "is", null);
+        const { data: members, error: membersError } = await supabase
+          .from("users")
+          .select("telegram_chat_id")
+          .eq("workspace_id", timer.workspace_id)
+          .not("telegram_chat_id", "is", null);
 
         if (membersError) {
           console.error(
@@ -1116,10 +1102,7 @@ app.post("/timer/start", authenticate, async (req, res) => {
         if (members?.length) {
           await Promise.all(
             members.map((member) =>
-              sendTelegramMessage(
-                member.telegram_chat_id,
-                messageText,
-              ),
+              sendTelegramMessage(member.telegram_chat_id, messageText),
             ),
           );
         }
@@ -1129,12 +1112,11 @@ app.post("/timer/start", authenticate, async (req, res) => {
 
       // Personal timer:
       // Yalnız timer sahibine Telegram gönder.
-      const { data: owner, error: ownerError } =
-        await supabase
-          .from("users")
-          .select("telegram_chat_id")
-          .eq("id", timer.user_id)
-          .single();
+      const { data: owner, error: ownerError } = await supabase
+        .from("users")
+        .select("telegram_chat_id")
+        .eq("id", timer.user_id)
+        .single();
 
       if (ownerError) {
         console.error(
@@ -1149,10 +1131,7 @@ app.post("/timer/start", authenticate, async (req, res) => {
         return;
       }
 
-      await sendTelegramMessage(
-        owner.telegram_chat_id,
-        messageText,
-      );
+      await sendTelegramMessage(owner.telegram_chat_id, messageText);
     },
   );
 
@@ -1221,6 +1200,40 @@ app.post("/telegram/control", authenticate, async (req, res) => {
 // ─── Sağlık kontrolü ──────────────────────────────────────────────────────
 app.get("/health", (req, res) => {
   res.json({ status: "ok" });
+});
+
+io.use(async (socket, next) => {
+  const token = socket.handshake.auth?.token;
+
+  // Geçiş dönemi:
+  // Eski APK'lar henüz token göndermiyor.
+  // Şimdilik bağlantıyı engellemiyoruz.
+  if (!token) {
+    socket.data.authenticated = false;
+    socket.data.user = null;
+    socket.data.sessionId = null;
+
+    return next();
+  }
+
+  const result = await validateAccessToken(token);
+
+  if (!result.ok) {
+    const error = new Error("unauthorized");
+
+    error.data = {
+      status: result.status,
+      message: result.error,
+    };
+
+    return next(error);
+  }
+
+  socket.data.authenticated = true;
+  socket.data.user = result.user;
+  socket.data.sessionId = result.sessionId;
+
+  next();
 });
 
 // ─── Socket.io — Ortak Ekran ──────────────────────────────────────────────
