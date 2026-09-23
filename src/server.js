@@ -715,6 +715,7 @@ app.post("/timers", authenticate, async (req, res) => {
         elapsed: Number(data.accumulated_ms || 0),
         remaining: data.type === "down" ? targetMs : null,
         reachedTarget: false,
+        pausedCount: Number(data.paused_count || 0),
       },
     });
 
@@ -750,10 +751,11 @@ app.patch("/timers/:id", authenticate, async (req, res) => {
     return res.status(400).json({ error: "Güncellenebilir alan yok" });
   }
 
-  // Timer'ı önce bul.
   const { data: existing, error: fetchError } = await supabase
     .from("timers")
-    .select("id, user_id, workspace_id, is_shared, record_status")
+    .select(
+      "id, user_id, workspace_id, is_shared, record_status, status, paused_count",
+    )
     .eq("id", id)
     .eq("record_status", "active")
     .single();
@@ -767,7 +769,6 @@ app.patch("/timers/:id", authenticate, async (req, res) => {
     return res.status(404).json({ error: "Timer bulunamadı" });
   }
 
-  // Yetki kontrolü.
   let canUpdate = false;
 
   if (req.user.role === "superadmin") {
@@ -786,7 +787,27 @@ app.patch("/timers/:id", authenticate, async (req, res) => {
     });
   }
 
-  // started_at yalnızca ilk kez running olduğunda yazılır.
+  // Shared timer'da paused_count değerine client karar veremez.
+  if (existing.is_shared) {
+    delete filtered.paused_count;
+
+    // Gerçek bir running -> paused geçişiyse DB'deki sayaç 1 artar.
+    if (filtered.status === "paused" && existing.status === "running") {
+      filtered.paused_count = Number(existing.paused_count || 0) + 1;
+    }
+  } else if (filtered.paused_count !== undefined) {
+    // Personal timer kendi local pause sayısını gönderir.
+    const pausedCount = Number(filtered.paused_count);
+
+    if (!Number.isInteger(pausedCount) || pausedCount < 0) {
+      return res.status(400).json({
+        error: "Geçersiz paused_count değeri",
+      });
+    }
+
+    filtered.paused_count = pausedCount;
+  }
+
   if (filtered.status === "running") {
     const { error: rpcError } = await supabase.rpc("set_started_at_if_null", {
       timer_id: id,
@@ -799,13 +820,12 @@ app.patch("/timers/:id", authenticate, async (req, res) => {
     }
   }
 
-  // Önce veritabanını güncelle.
   const { data: updated, error: updateError } = await supabase
     .from("timers")
     .update(filtered)
     .eq("id", id)
     .eq("record_status", "active")
-    .select("id")
+    .select("id, paused_count")
     .single();
 
   if (updateError || !updated) {
@@ -816,24 +836,24 @@ app.patch("/timers/:id", authenticate, async (req, res) => {
     }
 
     console.error("[PATCH /timers/:id] Timer update hatası:", updateError);
+
     return res.status(500).json({
       error: "Timer güncellenemedi",
     });
   }
 
-  // Shared timer ise yalnız DB başarılı olduktan sonra
-  // workspace'teki cihazlara socket event'i gönder.
   if (existing.is_shared && existing.workspace_id) {
     const socketData = { id };
 
-    // Start / Pause
     if (filtered.status === "running" || filtered.status === "paused") {
       socketData.status = filtered.status;
       socketData.endsAt = filtered.ends_at ?? null;
       socketData.accumulatedTimeAtStart = filtered.accumulated_ms ?? 0;
+
+      // Her cihaz DB'deki gerçek değeri alır.
+      socketData.pausedCount = Number(updated.paused_count || 0);
     }
 
-    // Ödendi / Ödenmedi
     if (filtered.is_pay !== undefined) {
       socketData.isPay = filtered.is_pay;
     }
@@ -850,7 +870,10 @@ app.patch("/timers/:id", authenticate, async (req, res) => {
     }
   }
 
-  res.json({ success: true });
+  res.json({
+    success: true,
+    pausedCount: Number(updated.paused_count || 0),
+  });
 });
 
 // Timer sil (gerçekten silmez, record_status = deleted yapar)
