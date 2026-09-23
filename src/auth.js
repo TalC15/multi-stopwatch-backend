@@ -49,73 +49,121 @@ export function verifyToken(token) {
 }
 
 // Middleware — her korumalı route'da kullanılacak
-// Kullanıcıyı DB'den al + oturumun iptal edilip edilmediğini kontrol et
-export async function authenticate(req, res, next) {
-  const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ error: 'Token gerekli' });
-  }
-
-  const token = authHeader.split(' ')[1];
+// Access token + kullanıcı + session doğrulaması
+// HTTP ve Socket.IO aynı güvenlik kuralını kullanabilsin diye ortak helper.
+export async function validateAccessToken(token) {
   const decoded = verifyToken(token);
 
-  if (!decoded || decoded.type !== 'access') {
-    return res.status(401).json({ error: 'Geçersiz veya süresi dolmuş token' });
+  if (!decoded || decoded.type !== "access") {
+    return {
+      ok: false,
+      status: 401,
+      error: "Geçersiz veya süresi dolmuş token",
+    };
   }
 
   try {
     const [userResult, sessionResult] = await Promise.all([
       supabase
-        .from('users')
-        .select('id, username, role, workspace_id')
-        .eq('id', decoded.id)
+        .from("users")
+        .select("id, username, role, workspace_id")
+        .eq("id", decoded.id)
         .single(),
-       decoded.sessionId
+
+      decoded.sessionId
         ? supabase
-            .from('sessions')
-            .select('id, revoked_at')
-            .eq('id', decoded.sessionId)
-            .eq('user_id', decoded.id)
+            .from("sessions")
+            .select("id, revoked_at")
+            .eq("id", decoded.sessionId)
+            .eq("user_id", decoded.id)
             .single()
-        : Promise.resolve({ data: null, error: { code: 'NO_SESSION_ID' } }),
+        : Promise.resolve({
+            data: null,
+            error: { code: "NO_SESSION_ID" },
+          }),
     ]);
 
     if (userResult.error || !userResult.data) {
-      // "Satır bulunamadı" → gerçekten geçersiz kullanıcı → 401
-      // Başka türlü hata (bağlantı vb.) → geçici altyapı sorunu → 503
-      const status = userResult.error?.code === 'PGRST116' ? 401 : 503;
-      return res.status(status).json({ error: 'Kullanıcı doğrulanamadı' });
+      const status =
+        userResult.error?.code === "PGRST116" ? 401 : 503;
+
+      return {
+        ok: false,
+        status,
+        error: "Kullanıcı doğrulanamadı",
+      };
     }
 
     if (sessionResult.error) {
       if (
-        sessionResult.error.code === 'PGRST116' ||
-        sessionResult.error.code === 'NO_SESSION_ID'
+        sessionResult.error.code === "PGRST116" ||
+        sessionResult.error.code === "NO_SESSION_ID"
       ) {
-        return res
-          .status(401)
-          .json({ error: 'Oturum sona ermiş, tekrar giriş yapın' });
+        return {
+          ok: false,
+          status: 401,
+          error: "Oturum sona ermiş, tekrar giriş yapın",
+        };
       }
-      return res
-        .status(503)
-        .json({ error: 'Sunucu geçici olarak erişilemiyor' });
+
+      return {
+        ok: false,
+        status: 503,
+        error: "Sunucu geçici olarak erişilemiyor",
+      };
     }
 
     if (!sessionResult.data || sessionResult.data.revoked_at) {
-      return res
-        .status(401)
-        .json({ error: 'Oturum sona ermiş, tekrar giriş yapın' });
+      return {
+        ok: false,
+        status: 401,
+        error: "Oturum sona ermiş, tekrar giriş yapın",
+      };
     }
 
-    req.user = userResult.data;
-    req.sessionId = decoded.sessionId;
-    next();
+    return {
+      ok: true,
+      user: userResult.data,
+      sessionId: decoded.sessionId,
+    };
   } catch (err) {
-    console.error('[authenticate] beklenmeyen hata:', err);
-    return res.status(503).json({ error: 'Sunucu geçici olarak erişilemiyor' });
+    console.error(
+      "[validateAccessToken] beklenmeyen hata:",
+      err,
+    );
+
+    return {
+      ok: false,
+      status: 503,
+      error: "Sunucu geçici olarak erişilemiyor",
+    };
   }
 }
 
+// Middleware — her korumalı route'da kullanılacak
+export async function authenticate(req, res, next) {
+  const authHeader = req.headers.authorization;
+
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return res.status(401).json({
+      error: "Token gerekli",
+    });
+  }
+
+  const token = authHeader.split(" ")[1];
+  const result = await validateAccessToken(token);
+
+  if (!result.ok) {
+    return res.status(result.status).json({
+      error: result.error,
+    });
+  }
+
+  req.user = result.user;
+  req.sessionId = result.sessionId;
+
+  next();
+}
 // Middleware — rol kontrolü
 export function authorize(...roles) {
   return (req, res, next) => {
