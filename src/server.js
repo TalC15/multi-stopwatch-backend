@@ -710,6 +710,7 @@ app.patch("/timers/:id", authenticate, async (req, res) => {
     "record_status",
     "accumulated_ms",
   ];
+
   const filtered = Object.fromEntries(
     Object.entries(updates).filter(([key]) => allowed.includes(key)),
   );
@@ -718,20 +719,80 @@ app.patch("/timers/:id", authenticate, async (req, res) => {
     return res.status(400).json({ error: "Güncellenebilir alan yok" });
   }
 
+  // Önce timer'ı bul. Yetki kontrolü yapılmadan hiçbir değişiklik yapma.
+  const { data: existing, error: fetchError } = await supabase
+    .from("timers")
+    .select("id, user_id, workspace_id, is_shared, record_status")
+    .eq("id", id)
+    .eq("record_status", "active")
+    .single();
+
+  if (fetchError || !existing) {
+    if (fetchError?.code !== "PGRST116") {
+      console.error("[PATCH /timers/:id] Timer okuma hatası:", fetchError);
+      return res.status(500).json({ error: "Timer okunamadı" });
+    }
+
+    return res.status(404).json({ error: "Timer bulunamadı" });
+  }
+
+  // Yetki kuralları:
+  // - Superadmin tüm timer'ları güncelleyebilir.
+  // - Shared timer'ı yalnız aynı workspace'teki kullanıcılar güncelleyebilir.
+  // - Personal timer'ı yalnız sahibi güncelleyebilir.
+  let canUpdate = false;
+
+  if (req.user.role === "superadmin") {
+    canUpdate = true;
+  } else if (existing.is_shared) {
+    canUpdate =
+      Boolean(existing.workspace_id) &&
+      existing.workspace_id === req.user.workspace_id;
+  } else {
+    canUpdate = existing.user_id === req.user.id;
+  }
+
+  if (!canUpdate) {
+    return res.status(403).json({
+      error: "Bu timer'ı güncelleme yetkiniz yok",
+    });
+  }
+
+  // started_at ilk kez running olduğunda kaydedilsin.
+  // Bu RPC artık yalnızca yetki kontrolünden SONRA çalışıyor.
   if (filtered.status === "running") {
     const { error: rpcError } = await supabase.rpc("set_started_at_if_null", {
       timer_id: id,
       new_started_at: new Date().toISOString(),
     });
+
+    if (rpcError) {
+      console.error("[PATCH /timers/:id] started_at RPC hatası:", rpcError);
+      return res.status(500).json({ error: "Timer başlatılamadı" });
+    }
   }
 
-  const { error } = await supabase
+  const { data: updated, error: updateError } = await supabase
     .from("timers")
     .update(filtered)
     .eq("id", id)
-    .eq("user_id", req.user.id);
+    .eq("record_status", "active")
+    .select("id")
+    .single();
 
-  if (error) return res.status(500).json({ error: "Timer güncellenemedi" });
+  if (updateError || !updated) {
+    if (updateError?.code === "PGRST116") {
+      return res.status(409).json({
+        error: "Timer artık aktif değil",
+      });
+    }
+
+    console.error("[PATCH /timers/:id] Timer update hatası:", updateError);
+    return res.status(500).json({
+      error: "Timer güncellenemedi",
+    });
+  }
+
   res.json({ success: true });
 });
 
