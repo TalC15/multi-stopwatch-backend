@@ -576,7 +576,14 @@ app.post(
       .eq("user_id", id)
       .is("revoked_at", null);
 
-    if (error) return res.status(500).json({ error: "Oturum kapatılamadı" });
+    if (error) {
+      return res.status(500).json({ error: "Oturum kapatılamadı" });
+    }
+
+    // Bu kullanıcıya ait tüm aktif login session socket'lerini
+    // server tarafından anında kapat.
+    io.in(`user-${id}`).disconnectSockets(true);
+
     res.json({ success: true });
   },
 );
