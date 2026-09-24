@@ -1217,15 +1217,60 @@ app.post("/timer/start", authenticate, async (req, res) => {
 });
 
 // Timer iptal
-app.post("/timer/cancel", authenticate, (req, res) => {
+// Timer iptal
+app.post("/timer/cancel", authenticate, async (req, res) => {
   const { timerId } = req.body;
 
   if (!timerId) {
-    return res.status(400).json({ error: "timerId zorunlu" });
+    return res.status(400).json({
+      error: "timerId zorunlu",
+    });
+  }
+
+  const { data: existing, error: timerError } = await supabase
+    .from("timers")
+    .select("id, user_id, workspace_id, is_shared, record_status")
+    .eq("id", timerId)
+    .eq("record_status", "active")
+    .single();
+
+  if (timerError || !existing) {
+    if (timerError?.code !== "PGRST116") {
+      console.error("[POST /timer/cancel] Timer okuma hatası:", timerError);
+
+      return res.status(500).json({
+        error: "Timer okunamadı",
+      });
+    }
+
+    return res.status(404).json({
+      error: "Timer bulunamadı",
+    });
+  }
+
+  let canCancel = false;
+
+  if (req.user.role === "superadmin") {
+    canCancel = true;
+  } else if (existing.is_shared) {
+    canCancel =
+      Boolean(existing.workspace_id) &&
+      existing.workspace_id === req.user.workspace_id;
+  } else {
+    canCancel = existing.user_id === req.user.id;
+  }
+
+  if (!canCancel) {
+    return res.status(403).json({
+      error: "Bu timer için bildirimi iptal etme yetkiniz yok",
+    });
   }
 
   cancelTimer(timerId);
-  res.json({ success: true });
+
+  return res.json({
+    success: true,
+  });
 });
 
 // telegram bağlantısını kaldır/chatID'yi sil
