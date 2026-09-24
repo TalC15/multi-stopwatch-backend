@@ -257,6 +257,8 @@ app.post("/auth/logout", async (req, res) => {
 
   // Logout idempotent olsun.
   if (session.revoked_at) {
+    io.in(`session-${session.id}`).disconnectSockets(true);
+
     return res.json({ success: true });
   }
 
@@ -276,6 +278,11 @@ app.post("/auth/logout", async (req, res) => {
       error: "Çıkış işlemi tamamlanamadı",
     });
   }
+
+  // DB session artık geçersiz.
+  // Aynı login session'ına bağlı açık socket'leri de
+  // server tarafından anında kapat.
+  io.in(`session-${session.id}`).disconnectSockets(true);
 
   return res.json({ success: true });
 });
