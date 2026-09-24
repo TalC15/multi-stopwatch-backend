@@ -210,14 +210,74 @@ app.post("/auth/refresh", async (req, res) => {
 });
 
 // Çıkış — mevcut oturumu iptal et
-app.post("/auth/logout", authenticate, async (req, res) => {
-  const { error } = await supabase
-    .from("sessions")
-    .update({ revoked_at: new Date().toISOString() })
-    .eq("id", req.sessionId);
+app.post("/auth/logout", async (req, res) => {
+  const { refreshToken } = req.body ?? {};
 
-  if (error) return res.status(500).json({ error: "Çıkış yapılamadı" });
-  res.json({ success: true });
+  if (!refreshToken) {
+    return res.status(400).json({ error: "Refresh token gerekli" });
+  }
+
+  const decoded = verifyToken(refreshToken);
+
+  if (
+    !decoded ||
+    decoded.type !== "refresh" ||
+    !decoded.id ||
+    !decoded.sessionId
+  ) {
+    return res.status(401).json({ error: "Geçersiz refresh token" });
+  }
+
+  const { data: session, error: sessionError } = await supabase
+    .from("sessions")
+    .select("id, user_id, refresh_token_hash, revoked_at")
+    .eq("id", decoded.sessionId)
+    .eq("user_id", decoded.id)
+    .single();
+
+  if (sessionError) {
+    if (sessionError.code === "PGRST116") {
+      return res.status(401).json({ error: "Oturum bulunamadı" });
+    }
+
+    console.error("[auth/logout] Session okunamadı:", sessionError);
+
+    return res.status(503).json({
+      error: "Sunucu geçici olarak erişilemiyor",
+    });
+  }
+
+  if (!session) {
+    return res.status(401).json({ error: "Oturum bulunamadı" });
+  }
+
+  if (session.refresh_token_hash !== hashToken(refreshToken)) {
+    return res.status(401).json({ error: "Geçersiz refresh token" });
+  }
+
+  // Logout idempotent olsun.
+  if (session.revoked_at) {
+    return res.json({ success: true });
+  }
+
+  const { error: revokeError } = await supabase
+    .from("sessions")
+    .update({
+      revoked_at: new Date().toISOString(),
+    })
+    .eq("id", session.id)
+    .eq("user_id", decoded.id)
+    .is("revoked_at", null);
+
+  if (revokeError) {
+    console.error("[auth/logout] Session revoke edilemedi:", revokeError);
+
+    return res.status(503).json({
+      error: "Çıkış işlemi tamamlanamadı",
+    });
+  }
+
+  return res.json({ success: true });
 });
 
 // ─── Kullanıcı Yönetimi (sadece superadmin ve manager) ───────────────────
