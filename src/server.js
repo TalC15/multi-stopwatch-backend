@@ -1074,6 +1074,35 @@ app.get("/timers/shared", authenticate, async (req, res) => {
   res.json({ timers: data });
 });
 
+// Mevcut kullanıcının kendi workspace-personal timer'larını getir
+app.get("/timers/personal", authenticate, async (req, res) => {
+  const workspaceId = req.user.workspace_id;
+  const userId = req.user.id;
+
+  if (!workspaceId) {
+    return res.json({ timers: [] });
+  }
+
+  const { data, error } = await supabase
+    .from("timers")
+    .select("*")
+    .eq("user_id", userId)
+    .eq("workspace_id", workspaceId)
+    .eq("is_shared", false)
+    .eq("record_status", "active")
+    .order("created_at", { ascending: false });
+
+  if (error) {
+    console.error("[GET /timers/personal] Timer okuma hatası:", error);
+
+    return res.status(503).json({
+      error: "Kişisel timer'lar geçici olarak alınamıyor",
+    });
+  }
+
+  return res.json({ timers: data || [] });
+});
+
 // ─── Timer Routes ─────────────────────────────────────────────────────────
 
 // Timer başlat - Telegram bildirimi planla
