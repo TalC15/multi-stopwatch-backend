@@ -855,7 +855,11 @@ app.patch("/timers/:id", authenticate, async (req, res) => {
       Boolean(existing.workspace_id) &&
       existing.workspace_id === req.user.workspace_id;
   } else {
-    canUpdate = existing.user_id === req.user.id;
+    canUpdate =
+      existing.user_id === req.user.id &&
+      (existing.workspace_id == null ||
+        (Boolean(req.user.workspace_id) &&
+          existing.workspace_id === req.user.workspace_id));
   }
 
   if (!canUpdate) {
@@ -1002,7 +1006,10 @@ app.delete("/timers/:id", authenticate, async (req, res) => {
     (existing.is_shared
       ? Boolean(existing.workspace_id) &&
         existing.workspace_id === req.user.workspace_id
-      : existing.user_id === req.user.id);
+      : existing.user_id === req.user.id &&
+        (existing.workspace_id == null ||
+          (Boolean(req.user.workspace_id) &&
+            existing.workspace_id === req.user.workspace_id)));
 
   if (!canDelete) {
     return res.status(403).json({
@@ -1154,7 +1161,11 @@ app.post("/timer/start", authenticate, async (req, res) => {
       Boolean(existing.workspace_id) &&
       existing.workspace_id === req.user.workspace_id;
   } else {
-    canStart = existing.user_id === req.user.id;
+    canStart =
+      existing.user_id === req.user.id &&
+      (existing.workspace_id == null ||
+        (Boolean(req.user.workspace_id) &&
+          existing.workspace_id === req.user.workspace_id));
   }
 
   if (!canStart) {
@@ -1217,14 +1228,24 @@ app.post("/timer/start", authenticate, async (req, res) => {
       // Yalnız timer sahibine Telegram gönder.
       const { data: owner, error: ownerError } = await supabase
         .from("users")
-        .select("telegram_chat_id")
+        .select("telegram_chat_id, workspace_id")
         .eq("id", timer.user_id)
         .single();
 
-      if (ownerError) {
+      if (ownerError || !owner) {
         console.error(
           "[POST /timer/start] Timer sahibi okunamadı:",
           ownerError,
+        );
+        return;
+      }
+
+      if (
+        timer.workspace_id != null &&
+        owner?.workspace_id !== timer.workspace_id
+      ) {
+        console.log(
+          "[POST /timer/start] Bildirim iptal edildi: kullanıcı artık timer'ın workspace'inde değil",
         );
         return;
       }
@@ -1286,7 +1307,11 @@ app.post("/timer/cancel", authenticate, async (req, res) => {
       Boolean(existing.workspace_id) &&
       existing.workspace_id === req.user.workspace_id;
   } else {
-    canCancel = existing.user_id === req.user.id;
+    canCancel =
+      existing.user_id === req.user.id &&
+      (existing.workspace_id == null ||
+        (Boolean(req.user.workspace_id) &&
+          existing.workspace_id === req.user.workspace_id));
   }
 
   if (!canCancel) {
