@@ -66,7 +66,7 @@ export async function validateAccessToken(token) {
     const [userResult, sessionResult] = await Promise.all([
       supabase
         .from("users")
-        .select("id, username, role, workspace_id")
+        .select("id, username, role, workspace_id, disabled_at")
         .eq("id", decoded.id)
         .single(),
 
@@ -92,6 +92,10 @@ export async function validateAccessToken(token) {
         status,
         error: "Kullanıcı doğrulanamadı",
       };
+    }
+
+    if (userResult.data.disabled_at) {
+      return { ok: false, status: 401, error: "Hesap kapatılmış" };
     }
 
     if (sessionResult.error) {

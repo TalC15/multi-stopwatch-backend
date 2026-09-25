@@ -6,7 +6,9 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
-    "dev": "node --watch src/server.js"
+    "dev": "node --watch src/server.js",
+    "test": "node --test test/*.test.js",
+    "test:concurrency": "node --test test/concurrency.test.js"
   },
   "keywords": [],
   "author": "",
@@ -21,5 +23,9 @@
     "jsonwebtoken": "^9.0.3",
     "node-cron": "^4.4.1",
     "socket.io": "^4.8.3"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.3.14",
+    "pg": "^8.23.0"
   }
 }

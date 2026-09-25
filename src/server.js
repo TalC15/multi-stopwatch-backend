@@ -114,7 +114,7 @@ app.post("/auth/login", loginLimiter, async (req, res) => {
   }
 
   const pinValid = await verifyPin(pin, user.pin_hash);
-  if (!pinValid) {
+  if (!pinValid || user.disabled_at) {
     recordFailedAttempt(username);
     return res.status(401).json({ error: "Kullanıcı adı veya PIN hatalı" });
   }
@@ -134,6 +134,9 @@ app.post("/auth/login", loginLimiter, async (req, res) => {
   });
 
   if (sessionError) {
+    if (sessionError.message?.includes("KEEPTIMER_ACCOUNT_DISABLED")) {
+      return res.status(401).json({ error: "Kullanıcı adı veya PIN hatalı" });
+    }
     console.error("[auth/login] oturum kaydı oluşturulamadı:", sessionError);
     return res.status(500).json({ error: "Giriş yapılamadı, tekrar deneyin" });
   }
@@ -197,10 +200,22 @@ app.post("/auth/refresh", async (req, res) => {
     return res.status(401).json({ error: "Geçersiz refresh token" });
   }
 
-  await supabase
-    .from("sessions")
-    .update({ last_used_at: new Date().toISOString() })
-    .eq("id", decoded.sessionId);
+  const { data: refreshedSession, error: refreshUpdateError } =
+    await supabase.rpc("keeptimer_refresh_session", {
+      p_user_id: decoded.id,
+      p_session_id: decoded.sessionId,
+      p_token_hash: hashToken(refreshToken),
+    });
+
+  if (refreshUpdateError?.message?.includes("KEEPTIMER_ACCOUNT_DISABLED")) {
+    return res.status(401).json({ error: "Hesap kapatılmış" });
+  }
+  if (refreshUpdateError) {
+    return res.status(503).json({ error: "Oturum yenilenemedi" });
+  }
+  if (!refreshedSession) {
+    return res.status(401).json({ error: "Hesap veya oturum sonlandırılmış" });
+  }
 
   const accessToken = generateAccessToken(
     { id: decoded.id },
@@ -208,6 +223,120 @@ app.post("/auth/refresh", async (req, res) => {
   );
   res.json({ accessToken });
 });
+
+// A closing worker must not change a shared Telegram job with an HTTP request
+// that passed authentication before the account was closed. A counter also
+// handles two simultaneous closure requests without prematurely unblocking one.
+const workerClosures = new Map();
+
+function beginWorkerClosure(id) {
+  const state = workerClosures.get(id) || {
+    pending: 0,
+    closed: false,
+    uncertain: false,
+  };
+  state.pending++;
+  workerClosures.set(id, state);
+}
+
+function finishWorkerClosure(id, { closed = false, uncertain = false } = {}) {
+  const state = workerClosures.get(id);
+  state.pending--;
+  state.closed ||= closed;
+  state.uncertain ||= uncertain;
+  if (!state.pending && !state.closed && !state.uncertain)
+    workerClosures.delete(id);
+}
+
+// The SQL function commits the account change, archive, and session revocation
+// together. Memory-only cleanup runs only after its successful response.
+async function deactivateWorker(req, res, id) {
+  if (id === req.user.id) {
+    return res.status(400).json({ error: "Kendi hesabınızı kapatamazsınız" });
+  }
+
+  // Yetkisiz istek başka şirketin çalışanını geçici olarak engelleyemez.
+  // Nihai yetki kontrolü yine SQL fonksiyonundadır.
+  const { data: target, error: targetError } = await supabase
+    .from("users")
+    .select("id, role, workspace_id")
+    .eq("id", id)
+    .maybeSingle();
+
+  if (targetError) {
+    return res.status(503).json({ error: "Çalışan doğrulanamadı" });
+  }
+
+  if (!target) {
+    return res.status(404).json({ error: "Çalışan bulunamadı" });
+  }
+
+  if (
+    target.role !== "worker" ||
+    !target.workspace_id ||
+    (req.user.role === "manager" &&
+      req.user.workspace_id !== target.workspace_id)
+  ) {
+    return res.status(403).json({
+      error: "Bu çalışanı kapatma yetkiniz yok",
+    });
+  }
+
+  beginWorkerClosure(id);
+  const { data, error } = await supabase.rpc("keeptimer_close_company_worker", {
+    p_actor_id: req.user.id,
+    p_worker_id: id,
+  });
+
+  if (error) {
+    console.error("[deactivateWorker] Transaction başarısız:", error);
+    if (
+      error.message?.includes("KEEPTIMER_WORKER_FORBIDDEN") ||
+      error.message?.includes("KEEPTIMER_MANAGER_FORBIDDEN")
+    ) {
+      finishWorkerClosure(id);
+      return res
+        .status(403)
+        .json({ error: "Bu çalışanı kapatma yetkiniz yok" });
+    }
+
+    // The network may fail after the DB commits. Fail visibly, but if the
+    // account is in fact closed, still perform the in-memory cleanup.
+    const { data: closed, error: lookupError } = await supabase
+      .from("users")
+      .select("workspace_id, disabled_at")
+      .eq("id", id)
+      .maybeSingle();
+    // Unknown commit status must stay blocked locally; never allow a delayed
+    // shared notification request through on the strength of a failed lookup.
+    finishWorkerClosure(id, {
+      closed: Boolean(closed?.disabled_at),
+      uncertain: !closed?.disabled_at,
+    });
+    if (closed?.disabled_at && closed.workspace_id) {
+      const { data: archived, error: archiveError } = await supabase
+        .from("timers")
+        .select("id")
+        .eq("user_id", id)
+        .eq("workspace_id", closed.workspace_id)
+        .eq("is_shared", false)
+        .not("archived_at", "is", null);
+      if (archiveError)
+        console.error(
+          "[deactivateWorker] Bildirim temizliği okunamadı:",
+          archiveError,
+        );
+      for (const timer of archived || []) cancelTimer(timer.id);
+      io.in(`user-${id}`).disconnectSockets(true);
+    }
+    return res.status(503).json({ error: "Hesap kapatma tamamlanamadı" });
+  }
+
+  finishWorkerClosure(id, { closed: true });
+  for (const timerId of data.archived_timer_ids) cancelTimer(timerId);
+  io.in(`user-${id}`).disconnectSockets(true);
+  return res.json({ success: true, alreadyDisabled: data.already_disabled });
+}
 
 // Çıkış — mevcut oturumu iptal et
 app.post("/auth/logout", async (req, res) => {
@@ -352,6 +481,11 @@ app.post(
   authenticate,
   authorize("superadmin", "manager"),
   async (req, res) => {
+    if (req.user.role === "manager" && req.user.workspace_id) {
+      return res
+        .status(403)
+        .json({ error: "Mevcut şirketinizden ayrılamazsınız" });
+    }
     const { name } = req.body;
 
     if (!name) {
@@ -369,10 +503,17 @@ app.post(
     if (error)
       return res.status(500).json({ error: "Workspace oluşturulamadı" });
 
-    await supabase
+    const { error: assignError } = await supabase
       .from("users")
       .update({ workspace_id: workspace.id })
       .eq("id", req.user.id);
+
+    if (assignError) {
+      console.error("[workspace/create] Üyelik güncellenemedi:", assignError);
+      return res
+        .status(503)
+        .json({ error: "Workspace üyeliği oluşturulamadı" });
+    }
 
     res.json({ success: true, workspace });
   },
@@ -380,6 +521,14 @@ app.post(
 
 // Davet kodu ile katıl
 app.post("/workspace/join", authenticate, async (req, res) => {
+  if (
+    req.user.role === "worker" ||
+    (req.user.role === "manager" && req.user.workspace_id)
+  ) {
+    return res
+      .status(403)
+      .json({ error: "Şirket hesabı başka şirkete katılamaz" });
+  }
   const { inviteCode } = req.body;
 
   if (!inviteCode) {
@@ -396,10 +545,13 @@ app.post("/workspace/join", authenticate, async (req, res) => {
     return res.status(404).json({ error: "Geçersiz davet kodu" });
   }
 
-  await supabase
+  const { error: joinError } = await supabase
     .from("users")
     .update({ workspace_id: workspace.id })
     .eq("id", req.user.id);
+
+  if (joinError)
+    return res.status(503).json({ error: "Workspace üyeliği güncellenemedi" });
 
   res.json({ success: true, workspace });
 });
@@ -475,10 +627,13 @@ app.post("/register", authenticate, async (req, res) => {
     return res.status(500).json({ error: "Telegram doğrulaması başarısız" });
   }
 
-  await supabase
+  const { error: registerError } = await supabase
     .from("users")
     .update({ telegram_chat_id: chatId })
     .eq("id", req.user.id);
+
+  if (registerError)
+    return res.status(409).json({ error: "Telegram bağlantısı kaydedilemedi" });
 
   res.json({ success: true });
 });
@@ -506,7 +661,8 @@ app.get(
   async (req, res) => {
     let query = supabase
       .from("users")
-      .select("id, username, role, created_at, workspace_id");
+      .select("id, username, role, created_at, workspace_id, disabled_at")
+      .is("disabled_at", null);
 
     if (req.user.role !== "superadmin") {
       if (!req.user.workspace_id) {
@@ -522,27 +678,13 @@ app.get(
   },
 );
 
-// Kullanıcı sil
+// Çalışan hesabını kapat (kayıtları şirkette sakla).
 app.delete(
   "/users/:id",
   authenticate,
   authorize("superadmin", "manager"),
   async (req, res) => {
-    const { id } = req.params;
-
-    if (id === req.user.id) {
-      return res.status(400).json({ error: "Kendinizi silemezsiniz" });
-    }
-
-    const { error } = await supabase
-      .from("users")
-      .delete()
-      .eq("id", id)
-      .eq("workspace_id", req.user.workspace_id);
-
-    if (error) return res.status(500).json({ error: "Kullanıcı silinemedi" });
-
-    res.json({ success: true });
+    return deactivateWorker(req, res, req.params.id);
   },
 );
 
@@ -596,7 +738,8 @@ app.get(
   async (req, res) => {
     const { data, error } = await supabase
       .from("users")
-      .select("id, username, role, workspace_id, created_at");
+      .select("id, username, role, workspace_id, created_at, disabled_at")
+      .is("disabled_at", null);
 
     if (error) return res.status(500).json({ error: "Kullanıcılar alınamadı" });
     res.json({ users: data });
@@ -618,12 +761,14 @@ app.patch(
       .eq("id", id);
 
     if (error)
-      return res.status(500).json({ error: "Kullanıcı güncellenemedi" });
+      return res
+        .status(error.message?.startsWith("KEEPTIMER_") ? 409 : 500)
+        .json({ error: "Kullanıcı güncellenemedi" });
     res.json({ success: true });
   },
 );
 
-// Kullanıcı sil (sadece superadmin)
+// Superadmin şirket çalışanını kapatır; DB diğer şirket kayıtlarını korur.
 app.delete(
   "/admin/users/:id",
   authenticate,
@@ -635,9 +780,26 @@ app.delete(
       return res.status(400).json({ error: "Kendinizi silemezsiniz" });
     }
 
+    const { data: target, error: lookupError } = await supabase
+      .from("users")
+      .select("id, role, workspace_id")
+      .eq("id", id)
+      .single();
+
+    if (lookupError || !target)
+      return res.status(404).json({ error: "Kullanıcı bulunamadı" });
+    if (target.role === "worker" && target.workspace_id) {
+      return deactivateWorker(req, res, id);
+    }
+    if (target.role === "manager" && target.workspace_id) {
+      return res
+        .status(409)
+        .json({ error: "Şirket yöneticisi bu yoldan silinemez" });
+    }
+
     const { error } = await supabase.from("users").delete().eq("id", id);
 
-    if (error) return res.status(500).json({ error: "Kullanıcı silinemedi" });
+    if (error) return res.status(409).json({ error: "Kullanıcı silinemedi" });
     res.json({ success: true });
   },
 );
@@ -660,30 +822,22 @@ app.get(
 
 // Workspace'den ayrıl
 app.post("/workspace/leave", authenticate, async (req, res) => {
+  if (req.user.role === "worker" || req.user.role === "manager") {
+    return res
+      .status(403)
+      .json({ error: "Şirket hesabı şirketinden ayrılamaz" });
+  }
   if (!req.user.workspace_id) {
     return res.status(400).json({ error: "Zaten bir workspace'de değilsiniz" });
   }
 
-  if (req.user.role === "manager") {
-    const { data: otherManagers } = await supabase
-      .from("users")
-      .select("id")
-      .eq("workspace_id", req.user.workspace_id)
-      .eq("role", "manager")
-      .neq("id", req.user.id);
-
-    if (!otherManagers || otherManagers.length === 0) {
-      return res.status(400).json({
-        error:
-          "Workspace'de tek manager sizsiniz. Ayrılmadan önce başka bir manager atayın.",
-      });
-    }
-  }
-
-  await supabase
+  const { error: leaveError } = await supabase
     .from("users")
     .update({ workspace_id: null })
     .eq("id", req.user.id);
+
+  if (leaveError)
+    return res.status(409).json({ error: "Workspace'den ayrılamadınız" });
 
   res.json({ success: true });
 });
@@ -735,7 +889,8 @@ app.get(
     const { data: members } = await supabase
       .from("users")
       .select("id, username, role, created_at")
-      .eq("workspace_id", id);
+      .eq("workspace_id", id)
+      .is("disabled_at", null);
 
     res.json({ workspace, members: members || [] });
   },
@@ -770,6 +925,9 @@ app.post("/timers", authenticate, async (req, res) => {
 
   if (error) {
     console.error("[POST /timers] Timer oluşturma hatası:", error);
+    if (error.message?.includes("KEEPTIMER_ACCOUNT_DISABLED")) {
+      return res.status(401).json({ error: "Hesap kapatılmış" });
+    }
     return res.status(500).json({ error: "Timer oluşturulamadı" });
   }
 
@@ -835,6 +993,7 @@ app.patch("/timers/:id", authenticate, async (req, res) => {
     )
     .eq("id", id)
     .eq("record_status", "active")
+    .is("archived_at", null)
     .single();
 
   if (fetchError || !existing) {
@@ -893,11 +1052,7 @@ app.patch("/timers/:id", authenticate, async (req, res) => {
   // Shared timer'da paused_count değerine client karar veremez.
   if (existing.is_shared) {
     delete filtered.paused_count;
-
-    // Gerçek bir running -> paused geçişiyse DB'deki sayaç 1 artar.
-    if (filtered.status === "paused" && existing.status === "running") {
-      filtered.paused_count = Number(existing.paused_count || 0) + 1;
-    }
+    // Atomik RPC geçişi okuyup sayaç değerini kendi transaction'ında artırır.
   } else if (filtered.paused_count !== undefined) {
     // Personal timer kendi local pause sayısını gönderir.
     const pausedCount = Number(filtered.paused_count);
@@ -911,24 +1066,13 @@ app.patch("/timers/:id", authenticate, async (req, res) => {
     filtered.paused_count = pausedCount;
   }
 
-  if (filtered.status === "running") {
-    const { error: rpcError } = await supabase.rpc("set_started_at_if_null", {
-      timer_id: id,
-      new_started_at: new Date().toISOString(),
-    });
-
-    if (rpcError) {
-      console.error("[PATCH /timers/:id] started_at RPC hatası:", rpcError);
-      return res.status(500).json({ error: "Timer başlatılamadı" });
-    }
-  }
-
   const { data: updated, error: updateError } = await supabase
-    .from("timers")
-    .update(filtered)
-    .eq("id", id)
-    .eq("record_status", "active")
-    .select("id, paused_count")
+    .rpc("keeptimer_change_timer", {
+      p_actor_id: req.user.id,
+      p_timer_id: id,
+      p_updates: filtered,
+      p_delete: false,
+    })
     .single();
 
   if (updateError || !updated) {
@@ -936,6 +1080,10 @@ app.patch("/timers/:id", authenticate, async (req, res) => {
       return res.status(409).json({
         error: "Timer artık aktif değil",
       });
+    }
+
+    if (updateError?.message?.includes("KEEPTIMER_")) {
+      return res.status(409).json({ error: "Timer artık değiştirilemiyor" });
     }
 
     console.error("[PATCH /timers/:id] Timer update hatası:", updateError);
@@ -995,6 +1143,7 @@ app.delete("/timers/:id", authenticate, async (req, res) => {
     .select("user_id, is_shared, workspace_id, record_status")
     .eq("id", id)
     .eq("record_status", "active")
+    .is("archived_at", null)
     .single();
 
   if (fetchError || !existing) {
@@ -1018,20 +1167,22 @@ app.delete("/timers/:id", authenticate, async (req, res) => {
   }
 
   const { data: updated, error: updateError } = await supabase
-    .from("timers")
-    .update({ record_status: "deleted" })
-    .eq("id", id)
-    .eq("record_status", "active")
-    .select("id, record_status")
+    .rpc("keeptimer_change_timer", {
+      p_actor_id: req.user.id,
+      p_timer_id: id,
+      p_updates: {},
+      p_delete: true,
+    })
     .single();
 
   if (updateError) {
     console.error("[DELETE /timers/:id] Timer update hatası:", updateError);
 
-    return res.status(500).json({
-      error: "Timer silinemedi",
-      details: updateError.message,
-    });
+    return res
+      .status(updateError.message?.includes("KEEPTIMER_") ? 409 : 500)
+      .json({
+        error: "Timer silinemedi",
+      });
   }
 
   if (!updated || updated.record_status !== "deleted") {
@@ -1072,6 +1223,7 @@ app.get("/timers/shared", authenticate, async (req, res) => {
     .eq("workspace_id", req.user.workspace_id)
     .eq("is_shared", true)
     .eq("record_status", "active")
+    .is("archived_at", null)
     .order("created_at", { ascending: false });
 
   if (error) {
@@ -1097,6 +1249,7 @@ app.get("/timers/personal", authenticate, async (req, res) => {
     .eq("workspace_id", workspaceId)
     .eq("is_shared", false)
     .eq("record_status", "active")
+    .is("archived_at", null)
     .order("created_at", { ascending: false });
 
   if (error) {
@@ -1132,6 +1285,7 @@ app.post("/timer/start", authenticate, async (req, res) => {
     .select("id, user_id, workspace_id, is_shared, record_status")
     .eq("id", timerId)
     .eq("record_status", "active")
+    .is("archived_at", null)
     .single();
 
   if (timerError || !existing) {
@@ -1174,6 +1328,19 @@ app.post("/timer/start", authenticate, async (req, res) => {
     });
   }
 
+  // A second auth check catches closures committed by another backend process.
+  // The local closure guard is checked immediately before touching the Map:
+  // a DB read alone leaves a window for this process's deactivation request.
+  const currentActor = await validateAccessToken(
+    req.headers.authorization.slice(7),
+  );
+  if (!currentActor.ok) {
+    return res.status(currentActor.status).json({ error: currentActor.error });
+  }
+  if (workerClosures.has(req.user.id)) {
+    return res.status(409).json({ error: "Hesap kapatma işlemi sürüyor" });
+  }
+
   scheduleTimer(
     req.user.id,
     timerId,
@@ -1183,12 +1350,19 @@ app.post("/timer/start", authenticate, async (req, res) => {
       // Bildirim zamanı geldiğinde timer'ın GÜNCEL halini tekrar oku.
       const { data: timer, error } = await supabase
         .from("timers")
-        .select("user_id, is_pay, is_shared, workspace_id, record_status")
+        .select(
+          "user_id, is_pay, is_shared, workspace_id, record_status, archived_at",
+        )
         .eq("id", tid)
         .single();
 
       // Timer artık yoksa/silinmişse bildirim gönderme.
-      if (error || !timer || timer.record_status !== "active") {
+      if (
+        error ||
+        !timer ||
+        timer.record_status !== "active" ||
+        timer.archived_at
+      ) {
         return;
       }
 
@@ -1203,6 +1377,7 @@ app.post("/timer/start", authenticate, async (req, res) => {
           .from("users")
           .select("telegram_chat_id")
           .eq("workspace_id", timer.workspace_id)
+          .is("disabled_at", null)
           .not("telegram_chat_id", "is", null);
 
         if (membersError) {
@@ -1228,11 +1403,11 @@ app.post("/timer/start", authenticate, async (req, res) => {
       // Yalnız timer sahibine Telegram gönder.
       const { data: owner, error: ownerError } = await supabase
         .from("users")
-        .select("telegram_chat_id, workspace_id")
+        .select("telegram_chat_id, workspace_id, disabled_at")
         .eq("id", timer.user_id)
         .single();
 
-      if (ownerError || !owner) {
+      if (ownerError || !owner || owner.disabled_at) {
         console.error(
           "[POST /timer/start] Timer sahibi okunamadı:",
           ownerError,
@@ -1259,6 +1434,38 @@ app.post("/timer/start", authenticate, async (req, res) => {
     },
   );
 
+  // A pre-authorized start request may reach here while a worker is being
+  // closed. If closure committed before scheduling, discard the new job.
+  if (!existing.is_shared && existing.workspace_id) {
+    const [ownerResult, currentResult] = await Promise.all([
+      supabase
+        .from("users")
+        .select("disabled_at")
+        .eq("id", existing.user_id)
+        .single(),
+      supabase
+        .from("timers")
+        .select("id")
+        .eq("id", timerId)
+        .is("archived_at", null)
+        .single(),
+    ]);
+    if (
+      ownerResult.error ||
+      currentResult.error ||
+      !ownerResult.data ||
+      ownerResult.data.disabled_at ||
+      !currentResult.data
+    ) {
+      cancelTimer(timerId);
+      return res
+        .status(
+          ownerResult.data?.disabled_at || !currentResult.data ? 409 : 503,
+        )
+        .json({ error: "Bildirim planlanamadı" });
+    }
+  }
+
   // Telegram bağlı olmasa bile HTTP isteği düzgün kapanır.
   res.json({
     success: true,
@@ -1282,6 +1489,7 @@ app.post("/timer/cancel", authenticate, async (req, res) => {
     .select("id, user_id, workspace_id, is_shared, record_status")
     .eq("id", timerId)
     .eq("record_status", "active")
+    .is("archived_at", null)
     .single();
 
   if (timerError || !existing) {
@@ -1320,6 +1528,18 @@ app.post("/timer/cancel", authenticate, async (req, res) => {
     });
   }
 
+  const currentActor = await validateAccessToken(
+    req.headers.authorization.slice(7),
+  );
+  if (!currentActor.ok) {
+    return res.status(currentActor.status).json({ error: currentActor.error });
+  }
+  // No await between this guard and cancelTimer: the local deactivation RPC
+  // marks the worker before its first await and cannot interleave here.
+  if (workerClosures.has(req.user.id)) {
+    return res.status(409).json({ error: "Hesap kapatma işlemi sürüyor" });
+  }
+
   cancelTimer(timerId);
 
   return res.json({
@@ -1330,29 +1550,39 @@ app.post("/timer/cancel", authenticate, async (req, res) => {
 // telegram bağlantısını kaldır/chatID'yi sil
 app.patch("/telegram/cancel", authenticate, async (req, res) => {
   try {
-    const { user_id } = req.body;
+    // Eski istemciler user_id gönderir; yetkiyi yalnız doğrulanmış oturum belirler.
+    if (req.body?.user_id != null && req.body.user_id !== req.user.id) {
+      return res
+        .status(403)
+        .json({ error: "Başka kullanıcının Telegram bağlantısı yönetilemez" });
+    }
     const { error } = await supabase
       .from("users")
       .update({ telegram_chat_id: null })
-      .eq("id", user_id);
+      .eq("id", req.user.id);
     if (error) {
       return res.status(500).json({ error: "telegram bağlantısı kesilemedi." });
     }
     return res.status(200).json({ success: "telegram bağlantısı kesildi." });
   } catch (err) {
-    console.log(err);
+    console.error("[telegram/cancel] Hata:", err);
+    return res.status(500).json({ error: "telegram bağlantısı kesilemedi." });
   }
 });
 
 // telegram chatID çekme
 app.post("/telegram/control", authenticate, async (req, res) => {
   try {
-    const { user_id } = req.body;
+    if (req.body?.user_id != null && req.body.user_id !== req.user.id) {
+      return res
+        .status(403)
+        .json({ error: "Başka kullanıcının Telegram bağlantısı sorgulanamaz" });
+    }
 
     const { data, error } = await supabase
       .from("users")
       .select("telegram_chat_id")
-      .eq("id", user_id)
+      .eq("id", req.user.id)
       .single();
 
     if (error) {
@@ -1463,3 +1693,5 @@ const PORT = process.env.PORT || 3000;
 httpServer.listen(PORT, () => {
   console.log(`[Server] ${PORT} portunda çalışıyor (HTTP + WebSocket)`);
 });
+
+export { httpServer };
