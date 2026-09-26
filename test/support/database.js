@@ -22,7 +22,7 @@ export const schema = `
   CREATE ROLE service_role;
   CREATE TABLE public.workspaces (
     id uuid PRIMARY KEY, name text NOT NULL, owner_id uuid,
-    invite_code text UNIQUE
+    invite_code text UNIQUE, shared_mode_enabled boolean NOT NULL DEFAULT true
   );
   CREATE TABLE public.users (
     id uuid PRIMARY KEY, username text NOT NULL UNIQUE, pin_hash text NOT NULL,
@@ -72,6 +72,10 @@ export async function fixture(t) {
   await db.query("UPDATE workspaces SET owner_id=$1 WHERE id=$2", [ids.manager, ids.company]);
   await db.query("INSERT INTO sessions(id,user_id,refresh_token_hash) VALUES($1,$2,'hash')", [ids.session, ids.worker]);
   return db;
+}
+
+export async function applyPersonalSyncMigration(db) {
+  await db.exec(await readFile(new URL("../../db/migrations/20260925_personal_sync_api.sql", import.meta.url), "utf8"));
 }
 
 export async function timer(db, id, opts = {}) {

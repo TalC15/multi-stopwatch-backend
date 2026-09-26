@@ -31,6 +31,7 @@ async function setup(t) {
   }
   await admin.query(schema.replace(/CREATE ROLE (anon|authenticated|service_role);/g, ""));
   await admin.query(await readFile(new URL("../db/migrations/20260925_company_account_deactivation.sql", import.meta.url), "utf8"));
+  await admin.query(await readFile(new URL("../db/migrations/20260925_personal_sync_api.sql", import.meta.url), "utf8"));
   await admin.query("INSERT INTO workspaces(id,name) VALUES ($1,'A'),($2,'B')", [ids.company, ids.otherCompany]);
   for (const [id, name, role, workspace] of [
     [ids.manager, "manager", "manager", ids.company],
@@ -54,6 +55,16 @@ const closing = (client) => client.query(
 const writing = (client, id, updates, actor = ids.worker) => client.query(
   "SELECT public.keeptimer_change_timer($1,$2,$3::jsonb,false)",
   [actor, id, JSON.stringify(updates)],
+);
+
+const syncState = JSON.stringify({
+  name: "Local", type: "up", target_minutes: 1, is_pay: false,
+  status: "idle", ends_at: null, ended_at: null,
+  duration_ms: null, accumulated_ms: 0, paused_count: 0,
+});
+const syncing = (client, id, actor = ids.worker, mutation = ids.deleted) => client.query(
+  "SELECT public.keeptimer_sync_personal($1,$2,$3,0,$4::jsonb) AS result",
+  [actor, id, mutation, syncState],
 );
 
 test("login session insert locks worker against closure; late login cannot create a session", { skip: !enabled }, async (t) => {
@@ -127,4 +138,47 @@ test("deactivation wins: late refresh, shared write, and duplicate closure wait 
   const again = await closing(closer);
   assert.equal(again.rows[0].result.already_disabled, true);
   assert.ok((await admin.query("SELECT revoked_at FROM sessions WHERE id=$1", [ids.session])).rows[0].revoked_at);
+});
+
+test("personal sync wins first: closure waits, then archives the committed record", { skip: !enabled }, async t => {
+  const { admin, writer, closer } = await setup(t);
+  await writer.query("BEGIN");
+  try {
+    assert.equal((await syncing(writer, ids.personal)).rows[0].result.created, true);
+    await assert.rejects(() => closing(closer), error => error.code === "55P03");
+    await writer.query("COMMIT");
+  } catch (error) { await writer.query("ROLLBACK"); throw error; }
+  await closing(closer);
+  const { rows } = await admin.query("SELECT archived_at, user_id, workspace_id FROM timers WHERE id=$1", [ids.personal]);
+  assert.ok(rows[0].archived_at);
+  assert.equal(rows[0].user_id, ids.worker);
+  assert.equal(rows[0].workspace_id, ids.company);
+  await assert.rejects(() => syncing(writer, ids.standalone), /KEEPTIMER_ACCOUNT_DISABLED/);
+});
+
+test("closure wins first: late personal sync cannot insert or overwrite", { skip: !enabled }, async t => {
+  const { admin, writer, closer } = await setup(t);
+  await closer.query("BEGIN");
+  try {
+    await closing(closer);
+    await assert.rejects(() => syncing(writer, ids.personal), error => error.code === "55P03");
+    await closer.query("COMMIT");
+  } catch (error) { await closer.query("ROLLBACK"); throw error; }
+  await assert.rejects(() => syncing(writer, ids.personal), /KEEPTIMER_ACCOUNT_DISABLED/);
+  assert.equal((await admin.query("SELECT count(*)::int AS n FROM timers WHERE id=$1", [ids.personal])).rows[0].n, 0);
+});
+
+test("two different accounts racing to create one client UUID cannot steal it", { skip: !enabled }, async t => {
+  const { admin, writer } = await setup(t);
+  await admin.query("SET lock_timeout = '250ms'");
+  await writer.query("BEGIN");
+  try {
+    await syncing(writer, ids.personal);
+    await assert.rejects(() => syncing(admin, ids.personal, ids.outsider, ids.standalone),
+      error => error.code === "55P03");
+    await writer.query("COMMIT");
+  } catch (error) { await writer.query("ROLLBACK"); throw error; }
+  await assert.rejects(() => syncing(admin, ids.personal, ids.outsider, ids.standalone),
+    /KEEPTIMER_TIMER_FORBIDDEN/);
+  assert.equal((await admin.query("SELECT user_id FROM timers WHERE id=$1", [ids.personal])).rows[0].user_id, ids.worker);
 });

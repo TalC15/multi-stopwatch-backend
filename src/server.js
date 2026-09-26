@@ -896,12 +896,128 @@ app.get(
   },
 );
 
+const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const validTarget = value => typeof value === "number" &&
+  Number.isFinite(value) && value > 0 &&
+  value * 60000 <= Number.MAX_SAFE_INTEGER;
+const validMs = value => Number.isSafeInteger(value) && value >= 0;
+
+function personalSyncError(res, error) {
+  const code = error?.message || "";
+  if (code.includes("KEEPTIMER_ACCOUNT_DISABLED")) {
+    return res.status(401).json({ error: "Hesap kapatılmış" });
+  }
+  if (code.includes("KEEPTIMER_TIMER_FORBIDDEN") ||
+      code.includes("KEEPTIMER_PERSONAL_WORKSPACE_REQUIRED")) {
+    return res.status(403).json({ error: "Kişisel timer yetkisi yok" });
+  }
+  if (code.includes("KEEPTIMER_TIMER_NOT_FOUND")) {
+    return res.status(404).json({ error: "Timer bulunamadı" });
+  }
+  if (code.includes("KEEPTIMER_SYNC_") ||
+      code.includes("KEEPTIMER_TIMER_NOT_ACTIVE") ||
+      code.includes("KEEPTIMER_ARCHIVED_TIMER_IMMUTABLE")) {
+    return res.status(409).json({ error: "Timer sürümü veya durumu değişti" });
+  }
+  console.error("[personal sync] Veritabanı hatası:", error);
+  return res.status(503).json({ error: "Kişisel senkronizasyon tamamlanamadı" });
+}
+
+function parseSyncIdentity(req) {
+  const body = req.body;
+  if (!body || typeof body !== "object" || Array.isArray(body) ||
+      !uuidPattern.test(req.params.id) || !uuidPattern.test(body.mutationId) ||
+      body.dataMode !== "workspace-personal" ||
+      !Number.isSafeInteger(body.expectedRevision) || body.expectedRevision < 0 ||
+      body.expectedRevision >= Number.MAX_SAFE_INTEGER) return null;
+  return body;
+}
+
+function parsePersonalState(body) {
+  const allowed = new Set([
+    "dataMode", "mutationId", "expectedRevision", "name", "type",
+    "targetMinutes", "isPay", "status", "endsAt", "endedAt",
+    "durationMs", "accumulatedMs", "pausedCount", "isShared",
+  ]);
+  if (Object.keys(body).some(key => !allowed.has(key)) ||
+      (body.isShared !== undefined && body.isShared !== false) ||
+      typeof body.name !== "string" || !body.name.trim() ||
+      !["up", "down"].includes(body.type) || !validTarget(body.targetMinutes) ||
+      typeof body.isPay !== "boolean" ||
+      !["idle", "running", "paused", "completed"].includes(body.status) ||
+      (body.type === "up" && body.status === "completed") ||
+      !validMs(body.accumulatedMs) || !validMs(body.pausedCount) ||
+      body.pausedCount > 2147483647 ||
+      (body.durationMs !== null && body.durationMs !== undefined &&
+        !validMs(body.durationMs))) return null;
+
+  const timestamp = value => {
+    if (value === null || value === undefined) return null;
+    if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T/.test(value)) return false;
+    const ms = Date.parse(value);
+    return Number.isFinite(ms) ? new Date(ms).toISOString() : false;
+  };
+  const ends = timestamp(body.endsAt);
+  const ended = timestamp(body.endedAt);
+  if (ends === false || ended === false ||
+      (body.status === "running" && ends === null)) return null;
+
+  return {
+    name: body.name, type: body.type, target_minutes: body.targetMinutes,
+    is_pay: body.isPay, status: body.status, ends_at: ends,
+    ended_at: ended, duration_ms: body.durationMs ?? null,
+    accumulated_ms: body.accumulatedMs, paused_count: body.pausedCount,
+  };
+}
+
+// Complete snapshots use an expected revision and stable mutation UUID. SQL
+// verifies the current account and timer under row locks before any write.
+app.put("/timers/personal/:id", authenticate, async (req, res) => {
+  const body = parseSyncIdentity(req);
+  const state = body && parsePersonalState(body);
+  if (!state) return res.status(400).json({ error: "Geçersiz kişisel timer durumu" });
+
+  const { data, error } = await supabase.rpc("keeptimer_sync_personal", {
+    p_actor_id: req.user.id, p_timer_id: req.params.id,
+    p_mutation_id: body.mutationId,
+    p_expected_revision: body.expectedRevision, p_state: state,
+  });
+  if (error || !data) return personalSyncError(res, error);
+  return res.status(data.created ? 201 : 200).json({ success: true, ...data });
+});
+
+app.delete("/timers/personal/:id", authenticate, async (req, res) => {
+  const body = parseSyncIdentity(req);
+  if (!body || Object.keys(body).some(key => ![
+    "dataMode", "mutationId", "expectedRevision",
+  ].includes(key))) {
+    return res.status(400).json({ error: "Geçersiz kişisel silme isteği" });
+  }
+  const { data, error } = await supabase.rpc("keeptimer_delete_personal", {
+    p_actor_id: req.user.id, p_timer_id: req.params.id,
+    p_mutation_id: body.mutationId,
+    p_expected_revision: body.expectedRevision,
+  });
+  if (error || !data) return personalSyncError(res, error);
+  return res.json({ success: true, ...data });
+});
+
 // Timer oluştur ve DB'ye kaydet
 app.post("/timers", authenticate, async (req, res) => {
   const { id, name, type, targetMinutes, isShared } = req.body;
 
-  if (!id || !name || !type) {
+  // This route is the unversioned legacy client contract. Explicit data modes
+  // must use the personal sync API; standalone is never a server record.
+  if (req.body.dataMode !== undefined) {
+    return res.status(400).json({ error: "Bu veri modu eski timer API'sinde kullanılamaz" });
+  }
+  if (!uuidPattern.test(id) || typeof name !== "string" || !name.trim() ||
+      !["up", "down"].includes(type) || !validTarget(targetMinutes) ||
+      (isShared !== undefined && typeof isShared !== "boolean")) {
     return res.status(400).json({ error: "Eksik parametre" });
+  }
+  if (isShared && !req.user.workspace_id) {
+    return res.status(403).json({ error: "Paylaşılan timer için workspace gerekli" });
   }
 
   const { data, error } = await supabase
@@ -927,6 +1043,12 @@ app.post("/timers", authenticate, async (req, res) => {
     console.error("[POST /timers] Timer oluşturma hatası:", error);
     if (error.message?.includes("KEEPTIMER_ACCOUNT_DISABLED")) {
       return res.status(401).json({ error: "Hesap kapatılmış" });
+    }
+    if (error.message?.includes("KEEPTIMER_SHARED_MODE_DISABLED")) {
+      return res.status(403).json({ error: "Yeni paylaşılan timer oluşturma kapalı" });
+    }
+    if (error.message?.includes("KEEPTIMER_TIMER_TARGET_REQUIRED")) {
+      return res.status(400).json({ error: "Geçerli hedef süre gerekli" });
     }
     return res.status(500).json({ error: "Timer oluşturulamadı" });
   }

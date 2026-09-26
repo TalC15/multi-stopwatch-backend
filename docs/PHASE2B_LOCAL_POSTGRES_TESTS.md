@@ -24,3 +24,12 @@ docker stop keeptimer-phase2b-db
 Testler ayrı `pg.Client` bağlantılarıyla giriş/session, refresh, kişisel ve
 shared timer yazmaları ile tekrarlanan kapatmanın kilit çakışmasını sınar.
 Başarılı sonuç görülmeden Phase 2B canlıya hazır kabul edilmemelidir.
+
+## Phase 2 ek yarış senaryoları
+
+`test/concurrency.test.js` artık aynı silinebilir yerel veritabanında üç
+kişisel senkronizasyon yarışını da çalıştırır: senkronizasyon kapatmadan önce,
+kapatma senkronizasyondan önce ve farklı iki hesabın aynı UUID ile eşzamanlı
+oluşturma girişimi. Yukarıdaki komut **yedi** ayrı bağlantı testini çalıştırır;
+önce hem Phase 2B hem de yeni Phase 2 SQL migration'ını test veritabanına
+uygular. Canlı Supabase URL'siyle çalıştırmayın.

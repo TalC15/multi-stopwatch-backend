@@ -568,3 +568,142 @@ düğmesinin arayüzden kaldırılması ve Phase 2C.
   sürecinde kapatma son DB doğrulamasından sonra başka süreçteki bellek işini
   etkileyebilir; dağıtık zamanlayıcı koordinasyonu bu fazda geliştirilmedi.
   Canlı SQL çalıştırılmadı, deploy veya push yapılmadı.
+
+---
+
+## 2026-09-25 — Phase 2 kişisel senkronizasyon backend tamamlaması
+
+### Gerekçe ve değişenler
+
+- `POST /timers` daha önce hedef süreyi ve yeni shared kayıt için workspace
+  ortak modunu doğrulamıyordu. Mevcut istemci sözleşmesi korunarak pozitif
+  hedef doğrulaması eklendi; ayrı migration yeni INSERT'leri veritabanında da
+  korur. Ortak mod kapalıyken yalnız yeni shared kayıt reddedilir.
+- `src/server.js` yalnız workspace-personal için
+  `PUT /timers/personal/:id` ve `DELETE /timers/personal/:id` yollarını ekler.
+  Kimlik ve workspace doğrulanmış
+  oturumdan gelir. Eski POST/PATCH/DELETE davranışları ve shared/socket/Telegram
+  akışları korunur.
+- `db/migrations/20260925_personal_sync_api.sql` mevcut satırları silmeden
+  `sync_revision` ile `last_sync_mutation_id` alanlarını ekler. Kişisel sync ve
+  silme fonksiyonları kullanıcıyı timer'dan önce kilitler; UUID çakışmasını,
+  kapanan hesabı, farklı workspace'i, arşiv ve deleted geçmişini tek transaction
+  içinde denetler. Eski PATCH/DELETE kişisel revision'ı da ilerletir. Yeni
+  fonksiyonlar yalnız `service_role` için çağrılabilir.
+- `docs/PHASE2_PERSONAL_SYNC_API.md` tam durum/versiyon/tekrar sözleşmesini,
+  eski frontend'in workspace dışı timer gönderme uyumluluk sınırını ve Phase 3
+  outbox yükümlülüklerini kaydeder. Frontend koduna dokunulmadı.
+- `test/personal-sync.test.js` ve `test/personal-sync-http.test.js` tekrar,
+  sahiplik, silme, hedef, ortak mod, arşiv, rollback ve eski HTTP yollarını
+  sınar. `test/concurrency.test.js` ayrı gerçek PostgreSQL bağlantıları için
+  üç yeni yarış senaryosu içerir; `test/support/database.js` yerel şemayı
+  günceller. `docs/PHASE2B_LOCAL_POSTGRES_TESTS.md` komutlarını korur.
+
+### Doğrulama ve sınırlar
+
+- Gömülü, silinebilir PGlite veritabanında iki migration birlikte yürütülüp
+  yeni ve mevcut işlev test edildi. Temiz kaynakta `npm test`: 25 geçti,
+  4 atlandı. Phase 2 koduyla `npm test`: 34 geçti, 0 başarısız, 7 atlandı.
+  Dokuz yeni HTTP/yerel SQL testi geçti; eklenen üç gerçek bağlantı yarışı da
+  henüz çalıştırılmadı. Ayrı PostgreSQL bağlantı testleri yalnız
+  özel yerel `*_keeptimer_test` veritabanında çalıştırılmalıdır; sonuçları
+  çalıştırılmadığında başarılı sayılmayacaktır.
+- Revizyon karşılaştırması gecikmiş tekrarların daha yeni veriyi ezmesini
+  engeller. Sınırsız işlem günlüğü yoktur; daha sonraki mutasyonlar gerçekleşmiş
+  eski bir isteğin tekrarına `409` dönebilir. Eski PATCH sürüm önkoşulu
+  taşımadığı için aynı timer'a daha sonra yazarsa yeni sync durumunu yine
+  değiştirebilir; Phase 3/4 geçişi aynı timer'a iki yazma yolunu birlikte
+  kullanmamalıdır.
+- Güncel frontend, workspace'i olmayan oturumda da eski `POST /timers` çağrısı
+  yapıyor. Canlı istemciyi bozmamak için eski workspace-null kayıt davranışı
+  korundu. Açık `standalone` modu eski POST'ta reddedilir; gerçek standalone
+  yerel davranış store entegrasyonunda sağlanacaktır.
+- Canlı SQL, commit, push ve deploy yapılmadı. Phase 3–6 kodu eklenmedi.
+
+---
+
+## 2026-09-26 — Phase 2 yerel doğrulama ve PostgreSQL yarış testleri
+
+### Neden
+
+Phase 2 kişisel senkronizasyon backend değişiklikleri hazırlandıktan sonra
+gerçek PostgreSQL bağlantılarıyla eşzamanlılık güvenliğinin ve yeni SQL
+migration'ının mevcut şirket verileriyle uyumluluğunun doğrulanması gerekiyordu.
+
+### Doğrulananlar
+
+- Phase 2 patch'i temiz backend main sürümünden oluşturulan
+  `feature/phase-2-personal-sync` dalına uygulandı.
+- `git diff --check` ve `node --check src/server.js` kontrolleri yapıldı.
+- Normal testler sıralı çalıştırılarak doğrulandı.
+- PostgreSQL yarış testleri Windows Node.js üzerinden WSL Ubuntu'daki
+  silinebilir yerel `keeptimer_keeptimer_test` veritabanında çalıştırıldı.
+- Yeni migration, Phase 2B migration'ı önceden kurulmuş olan
+  `keeptimer_restore_check` yerel yedek veritabanında denendi.
+- Canlı Supabase üzerinde herhangi bir SQL çalıştırılmadı.
+
+### Test sonuçları
+
+- Normal testler, sıralı çalıştırma:
+  34 başarılı, 0 başarısız, 7 atlanan.
+- Gerçek PostgreSQL yarış testleri:
+  7 başarılı, 0 başarısız, 0 atlanan.
+- Toplam 41 farklı test senaryosu başarıyla doğrulandı.
+
+İlk paralel normal test çalıştırmasında eski
+`notification-disabled.test.js` içindeki Telegram bildirimi testi
+başarısız oldu. Aynı test tek başına başarılıydı. Normal testlerin
+tamamı sıralı çalıştırıldığında geçti.
+
+Paralel çalıştırmadaki zamanlama sorununun kesin nedeni henüz
+belirlenmedi. Bu bulgu gelecekteki test çalışmalarında dikkate
+alınmalıdır; test kaldırılmadı veya gevşetilmedi.
+
+### Migration doğrulaması
+
+`db/migrations/20260925_personal_sync_api.sql` dosyası yalnızca
+yerel `keeptimer_restore_check` veritabanına uygulandı.
+
+Migration işlemi COMMIT ile başarıyla tamamlandı.
+
+Aşağıdaki dört kontrolün tamamı başarılı:
+
+- `timers.sync_revision` alanı mevcut.
+- `timers.last_sync_mutation_id` alanı mevcut.
+- `keeptimer_sync_personal` fonksiyonu mevcut.
+- `keeptimer_delete_personal` fonksiyonu mevcut.
+
+Migration sonrasında yerel yedek veritabanında:
+
+- Kullanıcı: 14
+- Workspace: 4
+- Oturum: 178
+- Sayaç: 4671
+- Beklenmeyen senkronizasyon alanı değişikliği: 0
+
+Bu değerler migration sonrası doğrulanmıştır. Migration öncesi
+kayıt sayılarıyla bu aşamada doğrudan karşılaştırma yapılmadığından
+yalnızca bu sonuçlara dayanarak kayıt sayılarının birebir korunduğu
+iddia edilmemektedir.
+
+### Korunan kurallar
+
+- Canlı şirket verileri silinmedi veya sıfırlanmadı.
+- Phase 2B hesap kapatma ve arşivleme davranışı korundu.
+- Mevcut frontend ve eski API sözleşmesi korundu.
+- Phase 3 kapsamındaki outbox veya senkronizasyon motoru eklenmedi.
+- Phase 4 kapsamındaki frontend store entegrasyonu yapılmadı.
+
+### Git ve yayın durumu
+
+- Çalışılan dal: `feature/phase-2-personal-sync`
+- Phase 2 değişiklikleri henüz commit veya push edilmedi.
+- Yeni Phase 2 migration'ı canlı Supabase'e uygulanmadı.
+- Yeni backend sürümü Render'a deploy edilmedi.
+
+### Sonraki zorunlu işlemler
+
+- Phase 2 değişikliklerini ayrı Git dalında commit etmek.
+- Canlıya geçmeden önce güncel Supabase yedeği almak.
+- Yeni migration'ı ve backend yayınını kontrollü şekilde gerçekleştirmek.
+- Phase 3'e başlamadan önce yeni backend API'sinin canlı doğrulamasını yapmak.
