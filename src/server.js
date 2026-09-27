@@ -1361,7 +1361,36 @@ app.get("/timers/personal", authenticate, async (req, res) => {
   const userId = req.user.id;
 
   if (!workspaceId) {
-    return res.json({ timers: [] });
+    return req.query.syncPage !== undefined
+      ? res.status(403).json({ error: "Workspace gerekli" }) : res.json({ timers: [] });
+  }
+
+  // Opt-in keyset pages include explicit terminal records. Absence is never a deletion.
+  if (req.query.syncPage !== undefined) {
+    const after = req.query.after;
+    if (req.query.syncPage !== "1" || (after !== undefined &&
+        (typeof after !== "string" || !uuidPattern.test(after)))) {
+      return res.status(400).json({ error: "Geçersiz kişisel sayfalama isteği" });
+    }
+    let query = supabase.from("timers").select("*")
+      .eq("user_id", userId).eq("workspace_id", workspaceId).eq("is_shared", false)
+      .order("id", { ascending: true }).limit(200);
+    if (after) query = query.gt("id", after);
+    const { data: rows, error: pageError } = await query;
+    if (pageError || !Array.isArray(rows) || rows.some(row =>
+      !["active", "deleted"].includes(row.record_status))) {
+      return res.status(503).json({ error: "Kişisel senkronizasyon sayfası alınamadı" });
+    }
+    const timers = [], tombstones = [];
+    for (const row of rows) {
+      if (row.record_status === "deleted" || row.archived_at) {
+        tombstones.push({ id: row.id, user_id: row.user_id, workspace_id: row.workspace_id,
+          is_shared: false, record_status: row.record_status, archived_at: row.archived_at,
+          sync_revision: row.sync_revision });
+      } else timers.push(row);
+    }
+    // Even a short page may be capped by Supabase. Only an empty page ends traversal.
+    return res.json({ timers, tombstones, nextCursor: rows.length ? rows.at(-1).id : null });
   }
 
   const { data, error } = await supabase
