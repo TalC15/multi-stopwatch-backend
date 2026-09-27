@@ -707,3 +707,12 @@ iddia edilmemektedir.
 - Canlıya geçmeden önce güncel Supabase yedeği almak.
 - Yeni migration'ı ve backend yayınını kontrollü şekilde gerçekleştirmek.
 - Phase 3'e başlamadan önce yeni backend API'sinin canlı doğrulamasını yapmak.
+---
+
+## 2026-09-27 — Phase 4 frontend bağımlılığı: sayfalı terminal okuma
+
+- `src/server.js`: mevcut kişisel GET'e opt-in `syncPage=1&after=<uuid>`; scope filtreli UUID keyset sayfaları, açık deleted/archived terminal kayıtlar. Yalnız boş sayfa bitiştir; eski GET değişmez.
+- `test/personal-pages-http.test.js`: 1003 kayıt, 37 satır servis limiti, auth/scope, terminal ayrımı ve hata sözleşmesi için yerel HTTP testi.
+- `docs/PHASE4_PERSONAL_PAGES.md`: API, eşzamanlı tarama sınırı, veri kaybını önleyen istemci sözleşmesi.
+- `npm test`: 35 başarılı / 0 başarısız / 7 gerçek PostgreSQL testi bağlantı yokluğunda atlandı. Önceki test beklentileri değiştirilmedi. SQL/schema değişikliği yok.
+- Sebep: active-only GET diğer cihazdaki silme için kanıt sağlamıyordu; sonuç yokluğundan silme çıkarılmıyor. Shared Phase 5 kapsamına bırakıldı; commit/push/merge/canlı SQL/deploy yapılmadı.
