@@ -1,5 +1,23 @@
 # KeepTimer — AI Engineering Changelog
 
+## 2026-09-28 — Phase 5: shared CAS, canonical snapshot ve legacy fail-closed (SQL uygulanmadı)
+
+- Yeni dar shared commands API, DB actor → scope → timer kilidi, ayrı revision/CAS, DB zamanı ve canonical ACK/socket.
+- Additive 20260928_shared_authority.sql hazırlandı; HİÇBİR DB'DE ÇALIŞTIRILMADI.
+- Tek scalar JSON snapshot ile >1000 shared satırın dış rowset limitine takılmaması; terminal kayıtlar dahil.
+- Legacy shared POST/PATCH/DELETE/start/cancel HTTP 426; eski DB yazma yoluna guard. Eski APK frontend uyumluluk sistemi yok.
+- Canonical run/deadline Telegram job + atomik claim; kalıcı scheduler veya exactly-once teslim garantisi yok.
+- Personal endpoint/sayfalama, auth, önceki migration'lar ve mevcut 7 PG yarışı değişmedi.
+- Sıralı son backend testleri: 75 toplam, 56 pass / 0 fail / 19 skip (7 mevcut + 12 yeni gerçek PG). Skip, başarılı test değildir.
+- Son due/Socket sözleşme düzeltmesi: atomik claim başarılıysa SQL zarfı success:true; eski/reddedilen claim NULL. Backend fire false/eksik success veya kimliği/claim'i doğrulanamayan timer için Socket/Telegram üretmez. 3 HTTP regresyon testi eklendi; mevcut PG claim testine canonical alan assertion'ları eklendi fakat PG henüz çalıştırılmadı. Frontend patch değişmedi; ayrı contract-fixture doğrulaması geçti.
+- Hedefli ek düzeltme: false/eksik success içeren RPC snapshot/ACK 503; shared create için HTTP ve SQL integer milisaniye hedefi en az 1; eski uygunsuz kayıt komutunda SHARED_INVALID_STATE. Yerel offline alarmın sunucu/Telegram yazması üretmediği test edildi; ürün politikası değiştirilmedi.
+- Mevcut normal testlerde legacy 200 beklentisi yetkili 426 davranışına uyarlandı; closure/authorization yarış assertion'ları korundu.
+- Frontend 183 pass; standart build ortam CPU sorunu ile başarısız, doğrulama yardımcısıyla PWA build başarılı.
+- Dosya gerekçeleri, API, gerçek test sınırları ve ayrı disposable DB/migration/yayın onayı: docs/PHASE5_SHARED_AUTHORITY.md.
+- Commit/push/deploy/canlı SQL/Telegram işlemi yapılmadı.
+
+---
+
 > Amaç: Projede yapılan önemli değişiklikleri, nedenlerini, testlerini ve bilerek ertelenen işleri kalıcı biçimde kaydetmek.
 >
 > Kural: Bundan sonra onaylanan her proje değişikliğinden sonra bu dosyaya tarihli bir kayıt eklenir. Kayıt; ne değişti, neden değişti, hangi dosyalar etkilendi, hangi testler yapıldı ve neyin bilerek ertelendiğini içermelidir.

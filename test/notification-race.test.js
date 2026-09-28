@@ -110,7 +110,8 @@ test("a closing worker cannot reschedule or cancel a shared Telegram job", async
   let httpServer;
   try {
     const { generateAccessToken } = await import("../src/auth.js");
-    const { cancelTimer } = await import("../src/timers.js");
+    const { cancelTimer, scheduleTimer } = await import("../src/timers.js");
+    const { sendTelegramMessage } = await import("../src/telegram.js");
     ({ httpServer } = await import("../src/server.js"));
     if (!httpServer.listening) await once(httpServer, "listening");
     const origin = `http://127.0.0.1:${port}`;
@@ -136,7 +137,11 @@ test("a closing worker cannot reschedule or cancel a shared Telegram job", async
         nextNotification = deferred();
         const scheduled = await send("POST", "/timer/start", workerToken,
           { timerId, timerName: originalName, endsAt: Date.now() + 700 });
-        assert.equal(scheduled.status, 200);
+        assert.equal(scheduled.status, 426);
+        // Phase 5 blocks the legacy setup request. Seed an already accepted
+        // server job; retain all five original closure/interleaving assertions.
+        scheduleTimer(actorId,timerId,originalName,Date.now()+700,()=>
+          sendTelegramMessage("manager-chat",`${originalName} bitti! ODENMEDI`));
 
         const hold = { id: scenario.hold === "fresh-auth" ? actorId : timerId,
           reached: deferred(), release: deferred(), reads: 0 };

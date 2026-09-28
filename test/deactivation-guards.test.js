@@ -154,7 +154,8 @@ test("Phase 2B: deactivation guards", async t => {
           { timerId: sharedTimer }
         );
 
-        assert.equal(cancel.status, 200);
+        assert.equal(cancel.status, 426);
+        assert.equal((await cancel.json()).code, "SHARED_PROTOCOL_REQUIRED");
       }
     );
 

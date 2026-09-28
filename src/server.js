@@ -20,6 +20,7 @@ import {
   validateAccessToken,
 } from "./auth.js";
 import supabase from "./db.js";
+import { mountSharedTimers } from "./sharedTimers.js";
 
 dotenv.config();
 
@@ -32,6 +33,12 @@ app.use(express.json());
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
   cors: { origin: "*" }, // şimdilik herkese açık, ileride kısıtlarız
+});
+
+// Versioned shared routes precede the legacy routes; personal routes stay intact.
+mountSharedTimers({ app, authenticate, db: supabase, io, sendTelegramMessage });
+const sharedUpdateRequired = res => res.status(426).json({
+  error: "Ortak sayaç için sunucu komut protokolü gerekli", code: "SHARED_PROTOCOL_REQUIRED",
 });
 
 // Superadmin ilk kurulumda oluştur
@@ -1006,6 +1013,8 @@ app.delete("/timers/personal/:id", authenticate, async (req, res) => {
 app.post("/timers", authenticate, async (req, res) => {
   const { id, name, type, targetMinutes, isShared } = req.body;
 
+  if (isShared === true) return sharedUpdateRequired(res);
+
   // This route is the unversioned legacy client contract. Explicit data modes
   // must use the personal sync API; standalone is never a server record.
   if (req.body.dataMode !== undefined) {
@@ -1149,6 +1158,8 @@ app.patch("/timers/:id", authenticate, async (req, res) => {
     });
   }
 
+  if (existing.is_shared) return sharedUpdateRequired(res);
+
   // Count-Up hedefe ulaştığında timer tamamlanmış sayılmaz.
   // Eski client/APK "completed" gönderse bile DB'deki running state'i bozma.
   if (existing.type === "up" && filtered.status === "completed") {
@@ -1287,6 +1298,8 @@ app.delete("/timers/:id", authenticate, async (req, res) => {
       error: "Bu timer'ı silme yetkiniz yok",
     });
   }
+
+  if (existing.is_shared) return sharedUpdateRequired(res);
 
   const { data: updated, error: updateError } = await supabase
     .rpc("keeptimer_change_timer", {
@@ -1491,6 +1504,8 @@ app.post("/timer/start", authenticate, async (req, res) => {
   if (workerClosures.has(req.user.id)) {
     return res.status(409).json({ error: "Hesap kapatma işlemi sürüyor" });
   }
+  if (existing.is_shared) return sharedUpdateRequired(res);
+
 
   scheduleTimer(
     req.user.id,
@@ -1690,6 +1705,8 @@ app.post("/timer/cancel", authenticate, async (req, res) => {
   if (workerClosures.has(req.user.id)) {
     return res.status(409).json({ error: "Hesap kapatma işlemi sürüyor" });
   }
+  if (existing.is_shared) return sharedUpdateRequired(res);
+
 
   cancelTimer(timerId);
 
