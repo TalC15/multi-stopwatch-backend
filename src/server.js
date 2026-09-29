@@ -914,12 +914,14 @@ function personalSyncError(res, error) {
   if (code.includes("KEEPTIMER_ACCOUNT_DISABLED")) {
     return res.status(401).json({ error: "Hesap kapatılmış" });
   }
-  if (code.includes("KEEPTIMER_TIMER_FORBIDDEN") ||
-      code.includes("KEEPTIMER_PERSONAL_WORKSPACE_REQUIRED")) {
-    return res.status(403).json({ error: "Kişisel timer yetkisi yok" });
+  if (code.includes("KEEPTIMER_PERSONAL_WORKSPACE_REQUIRED")) {
+    return res.status(403).json({ error: "Kişisel timer yetkisi yok", code: "PERSONAL_WORKSPACE_REQUIRED" });
+  }
+  if (code.includes("KEEPTIMER_TIMER_FORBIDDEN")) {
+    return res.status(403).json({ error: "Kişisel timer yetkisi yok", code: "PERSONAL_TIMER_FORBIDDEN" });
   }
   if (code.includes("KEEPTIMER_TIMER_NOT_FOUND")) {
-    return res.status(404).json({ error: "Timer bulunamadı" });
+    return res.status(404).json({ error: "Timer bulunamadı", code: "PERSONAL_TIMER_NOT_FOUND" });
   }
   if (code.includes("KEEPTIMER_SYNC_") ||
       code.includes("KEEPTIMER_TIMER_NOT_ACTIVE") ||
@@ -1375,7 +1377,7 @@ app.get("/timers/personal", authenticate, async (req, res) => {
 
   if (!workspaceId) {
     return req.query.syncPage !== undefined
-      ? res.status(403).json({ error: "Workspace gerekli" }) : res.json({ timers: [] });
+      ? res.status(403).json({ error: "Workspace gerekli", code: "PERSONAL_WORKSPACE_REQUIRED" }) : res.json({ timers: [] });
   }
 
   // Opt-in keyset pages include explicit terminal records. Absence is never a deletion.
