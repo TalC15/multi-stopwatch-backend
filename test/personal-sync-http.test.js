@@ -4,7 +4,7 @@ import { createServer } from "node:net";
 import { once } from "node:events";
 import { ids } from "./support/database.js";
 
-test("old timer routes remain usable; new personal routes trust the session scope", async () => {
+test("old timer routes remain usable; new personal routes trust the session scope", async (t) => {
   process.env.JWT_SECRET = "local-phase2-personal-http-test";
   process.env.SUPABASE_URL = "http://127.0.0.1:54321";
   process.env.SUPABASE_SERVICE_KEY = "local-only-key";
@@ -15,6 +15,7 @@ test("old timer routes remain usable; new personal routes trust the session scop
   process.env.PORT = String(port);
 
   const insertCalls = [], syncCalls = [], deleteCalls = [], legacyCalls = [];
+  let forcedDenial = null;
   const originalFetch = globalThis.fetch;
   const eq = (url, key) => url.searchParams.get(key)?.replace(/^eq\./, "");
   globalThis.fetch = async (request, options = {}) => {
@@ -47,12 +48,12 @@ test("old timer routes remain usable; new personal routes trust the session scop
     } else if (table === "keeptimer_sync_personal") {
       const args = JSON.parse(options.body);
       syncCalls.push(args);
-      const denial = args.p_timer_id === ids.outsider
+      const denial = forcedDenial || (args.p_timer_id === ids.outsider
         ? "KEEPTIMER_TIMER_FORBIDDEN"
         : args.p_timer_id === ids.standalone
           ? "KEEPTIMER_ACCOUNT_DISABLED"
           : args.p_expected_revision === 9
-            ? "KEEPTIMER_SYNC_REVISION_CONFLICT" : null;
+            ? "KEEPTIMER_SYNC_REVISION_CONFLICT" : null);
       if (denial) return new Response(JSON.stringify({ code: "P0001", message: denial }),
         { status: 400, headers: { "Content-Type": "application/json" } });
       data = { created: true, duplicate: false,
@@ -60,6 +61,8 @@ test("old timer routes remain usable; new personal routes trust the session scop
     } else if (table === "keeptimer_delete_personal") {
       const args = JSON.parse(options.body);
       deleteCalls.push(args);
+      if (forcedDenial) return new Response(JSON.stringify({ code: "P0001", message: forcedDenial }),
+        { status: 400, headers: { "Content-Type": "application/json" } });
       data = { duplicate: false, timer: { id: args.p_timer_id, record_status: "deleted" } };
     } else if (table === "keeptimer_change_timer") {
       const args = JSON.parse(options.body);
@@ -139,6 +142,23 @@ test("old timer routes remain usable; new personal routes trust the session scop
     });
     assert.equal(deleted.status, 200);
     assert.equal(deleteCalls[0].p_actor_id, ids.worker);
+    for (const method of ["PUT", "DELETE"]) {
+      await t.test(`${method} typed timer/workspace/missing errors do not leak RPC detail`, async () => {
+        for (const [rpc, status, code] of [
+          ["KEEPTIMER_TIMER_FORBIDDEN", 403, "PERSONAL_TIMER_FORBIDDEN"],
+          ["KEEPTIMER_PERSONAL_WORKSPACE_REQUIRED", 403, "PERSONAL_WORKSPACE_REQUIRED"],
+          ["KEEPTIMER_TIMER_NOT_FOUND", 404, "PERSONAL_TIMER_NOT_FOUND"],
+        ]) {
+          forcedDenial = rpc;
+          const body = method === "PUT" ? personal : { dataMode:personal.dataMode,mutationId:personal.mutationId,expectedRevision:0 };
+          const result = await request(method, `/timers/personal/${ids.personal}`, body);
+          assert.equal(result.status, status);
+          const data = await result.json(); assert.equal(data.code, code);
+          assert.equal(JSON.stringify(data).includes("KEEPTIMER_"), false);
+        }
+        forcedDenial = null;
+      });
+    }
   } finally {
     globalThis.fetch = originalFetch;
     if (httpServer?.listening) {
