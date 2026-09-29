@@ -41,8 +41,8 @@ test("old timer routes remain usable; new personal routes trust the session scop
       }
       data = { ...inserted, sync_revision: 0 };
     } else if (table === "timers") {
-      data = { id: ids.personal, user_id: ids.worker,
-        workspace_id: ids.company, is_shared: false,
+      data = { id: eq(url,"id"), user_id: ids.worker,
+        workspace_id: ids.company, is_shared: eq(url,"id")===ids.shared,
         record_status: "active", status: "idle", type: "up" };
     } else if (table === "keeptimer_sync_personal") {
       const args = JSON.parse(options.body);
@@ -110,10 +110,13 @@ test("old timer routes remain usable; new personal routes trust the session scop
       { is_pay: true })).status, 200);
     assert.equal((await request("DELETE", `/timers/${ids.personal}`)).status, 200);
     assert.equal(legacyCalls.length, 2);
+    assert.equal((await request("PATCH", `/timers/${ids.shared}`, {status:"paused",accumulated_ms:0})).status,426);
+    assert.equal((await request("DELETE", `/timers/${ids.shared}`)).status,426);
+    assert.equal(legacyCalls.length,2); // No unversioned shared RPC call can bypass CAS.
     assert.equal((await request("POST", "/timers", {
       id: ids.shared, name: "Shared", type: "down",
       targetMinutes: 1, isShared: true,
-    })).status, 403);
+    })).status, 426);
 
     assert.equal((await request("PUT", `/timers/personal/${ids.personal}`,
       { ...personal, dataMode: "standalone" })).status, 400);
