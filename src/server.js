@@ -4,7 +4,7 @@ import dotenv from "dotenv";
 import crypto from "crypto";
 import rateLimit from "express-rate-limit";
 import { createServer } from "http";
-import { Server } from "socket.io";
+import { createSocketServer } from "./socketServer.js";
 import { scheduleTimer, cancelTimer } from "./timers.js";
 import { sendTelegramMessage } from "./telegram.js";
 import {
@@ -21,6 +21,7 @@ import {
 } from "./auth.js";
 import supabase from "./db.js";
 import { mountSharedTimers } from "./sharedTimers.js";
+import { validUsername, validNewPin, validRole, validWorkspace } from "./accountValidation.js";
 
 dotenv.config();
 
@@ -28,12 +29,15 @@ const app = express();
 app.use(cors());
 app.set("trust proxy", 1);
 app.use(express.json());
+app.use((_req, res, next) => {
+  res.set('X-Content-Type-Options', 'nosniff');
+  res.set('Cache-Control', 'no-store');
+  next();
+});
 
 // HTTP server oluştur — Socket.io bunun üzerine kurulacak
 const httpServer = createServer(app);
-const io = new Server(httpServer, {
-  cors: { origin: "*" }, // şimdilik herkese açık, ileride kısıtlarız
-});
+const io = createSocketServer(httpServer);
 
 // Versioned shared routes precede the legacy routes; personal routes stay intact.
 mountSharedTimers({ app, authenticate, db: supabase, io, sendTelegramMessage });
@@ -42,7 +46,7 @@ const sharedUpdateRequired = res => res.status(426).json({
 });
 
 // Superadmin ilk kurulumda oluştur
-createSuperAdminIfNotExists();
+void createSuperAdminIfNotExists().catch(() => console.error('[Auth] İlk kurulum tamamlanamadı'));
 
 // ─── Login güvenliği ────────────────────────────────────────────────────────
 
@@ -95,9 +99,9 @@ function clearFailedAttempts(username) {
 
 // Giriş
 app.post("/auth/login", loginLimiter, async (req, res) => {
-  const { username, pin } = req.body;
+  const { username, pin } = req.body ?? {};
 
-  if (!username || !pin) {
+  if (!validUsername(username) || typeof pin !== 'string' || !pin || pin.length > 25) {
     return res.status(400).json({ error: "Kullanıcı adı ve PIN gerekli" });
   }
 
@@ -162,8 +166,8 @@ app.post("/auth/login", loginLimiter, async (req, res) => {
 
 // Token yenile
 app.post("/auth/refresh", async (req, res) => {
-  const { refreshToken } = req.body;
-  if (!refreshToken) {
+  const { refreshToken } = req.body ?? {};
+  if (typeof refreshToken !== 'string' || !refreshToken || refreshToken.length > 4096) {
     return res.status(400).json({ error: "Refresh token gerekli" });
   }
 
@@ -349,7 +353,7 @@ async function deactivateWorker(req, res, id) {
 app.post("/auth/logout", async (req, res) => {
   const { refreshToken } = req.body ?? {};
 
-  if (!refreshToken) {
+  if (typeof refreshToken !== 'string' || !refreshToken || refreshToken.length > 4096) {
     return res.status(400).json({ error: "Refresh token gerekli" });
   }
 
@@ -423,19 +427,17 @@ app.post("/auth/logout", async (req, res) => {
   return res.json({ success: true });
 });
 
-// ─── Kullanıcı Yönetimi (sadece superadmin ve manager) ───────────────────
+// ─── Hesap oluşturma (yalnız superadmin); çalışan kapatma aşağıda ────────
 
 // Kullanıcı oluştur
 app.post(
   "/users/create",
   authenticate,
-  authorize("superadmin", "manager"),
+  authorize("superadmin"),
   async (req, res) => {
-    const { username, pin, role, workspace_id } = req.body;
-    if (username.length > 25 || pin.length > 25)
-      return res.status(400).json({ error: "çok uzun isim veya PIN" });
-    if (!username || !pin || !role) {
-      return res.status(400).json({ error: "Eksik parametre" });
+    const { username, pin, role, workspace_id = null } = req.body ?? {};
+    if (!validUsername(username) || !validNewPin(pin) || !validRole(role) || !validWorkspace(workspace_id)) {
+      return res.status(400).json({ error: "Geçerli kullanıcı adı, rol ve 6–25 karakterlik PIN gerekli" });
     }
 
     const usernameController = await supabase
@@ -447,31 +449,25 @@ app.post(
     if (usernameController.data)
       return res.status(400).json({ error: "Bu isim zaten mevcut" });
 
-    if (req.user.role === "manager" && role !== "worker") {
-      return res
-        .status(403)
-        .json({ error: "Manager sadece worker oluşturabilir" });
+    if (usernameController.error && usernameController.error.code !== 'PGRST116') {
+      return res.status(503).json({ error: "Kullanıcı adı kontrol edilemedi" });
     }
-
-    if (req.user.role === "manager" && !req.user.workspace_id) {
-      return res.status(400).json({ error: "Önce bir workspace oluşturun" });
+    if (workspace_id) {
+      const { data, error } = await supabase.from('workspaces').select('id').eq('id', workspace_id).maybeSingle();
+      if (error) return res.status(503).json({ error: "Şirket doğrulanamadı" });
+      if (!data) return res.status(400).json({ error: "Şirket bulunamadı" });
     }
-
-    const assignedWorkspaceId =
-      req.user.role === "superadmin"
-        ? workspace_id || null
-        : req.user.workspace_id;
 
     const pin_hash = await hashPin(pin);
 
     const { data, error } = await supabase
       .from("users")
-      .insert({ username, pin_hash, role, workspace_id: assignedWorkspaceId })
+      .insert({ username, pin_hash, role, workspace_id })
       .select()
       .single();
 
     if (error)
-      return res.status(500).json({ error: "Kullanıcı oluşturulamadı" });
+      return res.status(error.code === '23505' ? 409 : 500).json({ error: "Kullanıcı oluşturulamadı" });
 
     res.json({
       success: true,
@@ -486,66 +482,47 @@ app.post(
 app.post(
   "/workspace/create",
   authenticate,
-  authorize("superadmin", "manager"),
+  authorize("superadmin"),
   async (req, res) => {
-    if (req.user.role === "manager" && req.user.workspace_id) {
-      return res
-        .status(403)
-        .json({ error: "Mevcut şirketinizden ayrılamazsınız" });
-    }
-    const { name } = req.body;
+    const { name } = req.body ?? {};
 
-    if (!name) {
-      return res.status(400).json({ error: "Workspace adı gerekli" });
+    if (typeof name !== 'string' || !name.trim() || name.trim().length > 100) {
+      return res.status(400).json({ error: "Şirket adı 1–100 karakter olmalı" });
     }
 
-    const inviteCode = Math.random().toString(36).substring(2, 8).toUpperCase();
+    const inviteCode = crypto.randomBytes(12).toString('hex').toUpperCase();
 
     const { data: workspace, error } = await supabase
       .from("workspaces")
-      .insert({ name, owner_id: req.user.id, invite_code: inviteCode })
+      .insert({ name: name.trim(), owner_id: req.user.id, invite_code: inviteCode })
       .select()
       .single();
 
     if (error)
       return res.status(500).json({ error: "Workspace oluşturulamadı" });
 
-    const { error: assignError } = await supabase
-      .from("users")
-      .update({ workspace_id: workspace.id })
-      .eq("id", req.user.id);
-
-    if (assignError) {
-      console.error("[workspace/create] Üyelik güncellenemedi:", assignError);
-      return res
-        .status(503)
-        .json({ error: "Workspace üyeliği oluşturulamadı" });
-    }
-
+    // Provisioning another company must not move the administrator's own scope.
     res.json({ success: true, workspace });
   },
 );
 
 // Davet kodu ile katıl
 app.post("/workspace/join", authenticate, async (req, res) => {
-  if (
-    req.user.role === "worker" ||
-    (req.user.role === "manager" && req.user.workspace_id)
-  ) {
+  if (req.user.role !== "superadmin") {
     return res
       .status(403)
       .json({ error: "Şirket hesabı başka şirkete katılamaz" });
   }
-  const { inviteCode } = req.body;
+  const { inviteCode } = req.body ?? {};
 
-  if (!inviteCode) {
+  if (typeof inviteCode !== 'string' || !inviteCode.trim() || inviteCode.length > 100) {
     return res.status(400).json({ error: "Davet kodu gerekli" });
   }
 
   const { data: workspace, error } = await supabase
     .from("workspaces")
     .select("id, name")
-    .eq("invite_code", inviteCode.toUpperCase())
+    .eq("invite_code", inviteCode.trim().toUpperCase())
     .single();
 
   if (error || !workspace) {
@@ -589,12 +566,15 @@ app.post(
       return res.status(400).json({ error: "Bir workspace'de değilsiniz" });
     }
 
-    const { data: workspace } = await supabase
+    const { data: workspace, error: readError } = await supabase
       .from("workspaces")
       .select("shared_mode_enabled")
       .eq("id", req.user.workspace_id)
       .single();
 
+    if (readError || !workspace || typeof workspace.shared_mode_enabled !== 'boolean') {
+      return res.status(503).json({ error: "Ortak sayaç ayarı alınamadı" });
+    }
     const newValue = !workspace.shared_mode_enabled;
 
     const { error } = await supabase
@@ -610,11 +590,14 @@ app.post(
 // ─── Telegram Routes ──────────────────────────────────────────────────────
 
 // Telegram chat ID kaydet
-app.post("/register", authenticate, async (req, res) => {
-  const { chatId } = req.body;
+const telegramRegistrationLimiter = rateLimit({ windowMs: 60000, limit: 5, keyGenerator: req => req.user.id,
+  standardHeaders: true, legacyHeaders: false,
+  handler: (_req, res) => res.status(429).json({ error: "Biraz bekleyip tekrar deneyin." }) });
+app.post("/register", authenticate, telegramRegistrationLimiter, async (req, res) => {
+  const { chatId } = req.body ?? {};
 
-  if (!chatId) {
-    return res.status(400).json({ error: "chatId gerekli" });
+  if (!['string', 'number'].includes(typeof chatId) || !/^-?[1-9]\d{0,15}$/.test(String(chatId))) {
+    return res.status(400).json({ error: "Geçerli Telegram sohbet numarası gerekli" });
   }
 
   try {
@@ -624,7 +607,7 @@ app.post("/register", authenticate, async (req, res) => {
       text: "KeepTimer bildirimleri aktifleştirildi! ✓",
     });
 
-    const telegramRes = await fetch(testUrl + "?" + params.toString());
+    const telegramRes = await fetch(testUrl + "?" + params.toString(), { signal: AbortSignal.timeout(10000) });
     const telegramData = await telegramRes.json();
 
     if (!telegramData.ok) {
@@ -647,8 +630,13 @@ app.post("/register", authenticate, async (req, res) => {
 
 // Webhook — /id komutu
 app.post("/webhook", async (req, res) => {
+  const secret = process.env.TELEGRAM_WEBHOOK_SECRET;
+  if (typeof secret !== 'string' || !/^[A-Za-z0-9_-]{32,256}$/.test(secret)) return res.sendStatus(503);
+  const received = req.get('X-Telegram-Bot-Api-Secret-Token');
+  if (typeof received !== 'string' || Buffer.byteLength(received) !== Buffer.byteLength(secret) ||
+      !crypto.timingSafeEqual(Buffer.from(received), Buffer.from(secret))) return res.sendStatus(403);
   const message = req.body?.message;
-  if (!message) return res.sendStatus(200);
+  if (!message || !message.chat || !Number.isSafeInteger(message.chat.id)) return res.sendStatus(200);
 
   const chatId = message.chat.id;
   const text = message.text;
@@ -760,7 +748,18 @@ app.patch(
   authorize("superadmin"),
   async (req, res) => {
     const { id } = req.params;
-    const { username, role, workspace_id } = req.body;
+    const { username, role, workspace_id = null } = req.body ?? {};
+    if (!uuidPattern.test(id) || !validUsername(username) || !validRole(role) || !validWorkspace(workspace_id)) {
+      return res.status(400).json({ error: "Geçersiz kullanıcı bilgisi" });
+    }
+    const { data: target, error: lookupError } = await supabase.from('users').select('id, role, workspace_id, disabled_at').eq('id', id).maybeSingle();
+    if (lookupError) return res.status(503).json({ error: "Kullanıcı doğrulanamadı" });
+    if (!target) return res.status(404).json({ error: "Kullanıcı bulunamadı" });
+    if (target.disabled_at || (target.role === 'superadmin' && (role !== 'superadmin' || workspace_id !== target.workspace_id)) ||
+        (target.workspace_id && ['worker', 'manager'].includes(target.role) &&
+          (workspace_id !== target.workspace_id || role !== target.role))) {
+      return res.status(409).json({ error: "Şirkete bağlı hesabın rolü ve üyeliği korunur" });
+    }
 
     const { error } = await supabase
       .from("users")
@@ -771,6 +770,14 @@ app.patch(
       return res
         .status(error.message?.startsWith("KEEPTIMER_") ? 409 : 500)
         .json({ error: "Kullanıcı güncellenemedi" });
+    if (role !== target.role || workspace_id !== target.workspace_id) {
+      // An already signed-in unassigned account must reload its new role/scope.
+      // Company scope/role changes remain rejected above and by the SQL guard.
+      const { error: revokeError } = await supabase.from('sessions')
+        .update({ revoked_at: new Date().toISOString() }).eq('user_id', id).is('revoked_at', null);
+      io.in(`user-${id}`).disconnectSockets(true);
+      if (revokeError) return res.status(503).json({ error: "Hesap güncellendi ancak oturum kapatma doğrulanamadı. Hesabı kontrol edin." });
+    }
     res.json({ success: true });
   },
 );
@@ -795,6 +802,7 @@ app.delete(
 
     if (lookupError || !target)
       return res.status(404).json({ error: "Kullanıcı bulunamadı" });
+    if (target.role === 'superadmin') return res.status(409).json({ error: "Süper yönetici hesabı bu yoldan silinemez" });
     if (target.role === "worker" && target.workspace_id) {
       return deactivateWorker(req, res, id);
     }
@@ -853,16 +861,13 @@ app.post("/workspace/leave", authenticate, async (req, res) => {
 app.post(
   "/workspace/refresh-invite",
   authenticate,
-  authorize("manager", "superadmin"),
+  authorize("superadmin"),
   async (req, res) => {
     if (!req.user.workspace_id) {
       return res.status(400).json({ error: "Bir workspace'de değilsiniz" });
     }
 
-    const newInviteCode = Math.random()
-      .toString(36)
-      .substring(2, 8)
-      .toUpperCase();
+    const newInviteCode = crypto.randomBytes(12).toString('hex').toUpperCase();
 
     const { error } = await supabase
       .from("workspaces")
@@ -893,12 +898,13 @@ app.get(
     if (error || !workspace)
       return res.status(404).json({ error: "Workspace bulunamadı" });
 
-    const { data: members } = await supabase
+    const { data: members, error: membersError } = await supabase
       .from("users")
       .select("id, username, role, created_at")
       .eq("workspace_id", id)
       .is("disabled_at", null);
 
+    if (membersError) return res.status(503).json({ error: "Şirket üyeleri alınamadı" });
     res.json({ workspace, members: members || [] });
   },
 );
@@ -1773,6 +1779,13 @@ app.post("/telegram/control", authenticate, async (req, res) => {
 // ─── Sağlık kontrolü ──────────────────────────────────────────────────────
 app.get("/health", (req, res) => {
   res.json({ status: "ok" });
+});
+
+// Do not expose Express development stack traces or internal database details.
+app.use((error, _req, res, _next) => {
+  const invalidBody = error?.type === 'entity.parse.failed' || error?.type === 'entity.too.large';
+  if (!invalidBody) console.error('[HTTP] İstek tamamlanamadı');
+  return res.status(invalidBody ? 400 : 500).json({ error: invalidBody ? 'Geçersiz istek gövdesi' : 'İşlem tamamlanamadı' });
 });
 
 io.use(async (socket, next) => {

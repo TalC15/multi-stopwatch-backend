@@ -1,5 +1,29 @@
 # KeepTimer — AI Engineering Changelog
 
+## 2026-09-30 — Merkezi şirket yetkisi ve hedefli güvenlik düzeltmeleri
+
+- Şirket/hesap oluşturma ve erişim kodu yenileme yalnız süper yöneticiye açık.
+  Worker/manager şirket değiştiremez; şirket oluşturmak süper yöneticiyi taşımaz.
+  İlk atamada birden fazla manager desteklenir. Şirket rol/üyelik DB koruması,
+  çalışan kapatma ve saklanan kayıt davranışı korunur.
+- İlk süper yönetici için varsayılan/loglanan PIN kaldırıldı; yeni hesap
+  doğrulaması eklendi. Eski kısa PIN'lerin giriş akışı değişmedi.
+- Telegram webhook doğru secret header olmadan gönderim yapmaz. Güçlü
+  TELEGRAM_WEBHOOK_SECRET ve Telegram setWebhook secret_token birlikte gerekir;
+  yapılandırma: docs/COMMERCIAL_SECURITY_OPERATIONS.md. Register 5/dk/kullanıcı
+  sınırı ve Telegram istekleri 10 sn zaman aşımı ile korunur.
+- Hatalı JSON ve iç hatalar stack sızdırmaz; cache/nosniff başlıkları eklendi.
+  Üyelik/rol editleri güvenli reddedilir; atanmamış hesabın kapsam/yetki değişiminde
+  oturumlar kapatılır. Üye/ayar okuma hatası boş liste/başarı gibi sunulmaz.
+- Uzun bildirim süreleri Node timeout sınırında parçalanır; eski/iptal edilmiş
+  callback gönderim yapmaz. Yeni scheduler veya replay eklenmedi.
+- engine.io 6.6.9 → 6.6.11: GHSA-2gc4-cqfq-p2gv yüksek önem dereceli upgrade
+  DoS düzeltmesi. package.json veya yeni dependency yok; lock güncellendi.
+- `npm test`: 104 toplam, 85 pass, 0 fail, 19 gerçek PG skip. Gerçek PG
+  çalıştırılmadı, SQL uygulanmadı. 25 JS syntax kontrolü geçti; build script yok.
+- Son npm audit frontend/backend bilinen advisory: 0. Bu sonuç tam pentest veya
+  canlı konfigürasyon güvence belgesi değildir. Commit/push/deploy yok.
+
 ## 2026-09-28 — Phase 5: shared CAS, canonical snapshot ve legacy fail-closed (SQL uygulanmadı)
 
 - Yeni dar shared commands API, DB actor → scope → timer kilidi, ayrı revision/CAS, DB zamanı ve canonical ACK/socket.
