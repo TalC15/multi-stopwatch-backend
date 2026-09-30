@@ -5,22 +5,21 @@ export function scheduleTimer(userId, timerId, timerName, endsAt, onEnd) {
     clearTimeout(timers.get(timerId).timeout);
   }
 
-  if (!Number.isFinite(endsAt)) { timers.delete(timerId); return; }
-  const entry = { timeout: null, timerName };
-  timers.set(timerId, entry);
-  const wake = () => {
-    if (timers.get(timerId) !== entry) return;
-    const delay = endsAt - Date.now();
-    // Node's timeout ceiling is ~24.8 days; a larger delay fires immediately.
-    if (delay > 0) {
-      entry.timeout = setTimeout(wake, Math.min(delay, 2147483647));
-      return;
-    }
+  const delay = endsAt - Date.now();
+
+  if (delay <= 0) {
+    onEnd(userId, timerId, timerName);
+    return;
+  }
+
+  console.log(`[Timer] ${timerName} - ${Math.round(delay / 1000)}sn sonra bildirim`);
+
+  const timeout = setTimeout(() => {
     timers.delete(timerId);
-    Promise.resolve().then(() => onEnd(userId, timerId, timerName))
-      .catch(() => console.error('[Timer] Bildirim tamamlanamadı'));
-  };
-  wake();
+    onEnd(userId, timerId, timerName);
+  }, delay);
+
+  timers.set(timerId, { timeout, timerName });
 }
 
 export function cancelTimer(timerId) {

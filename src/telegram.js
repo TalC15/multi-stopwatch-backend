@@ -7,7 +7,7 @@ export async function sendTelegramMessage(chatId, text) {
   });
 
   try {
-    const response = await fetch(url + "?" + params.toString(), { signal: AbortSignal.timeout(10000) });
+    const response = await fetch(url + "?" + params.toString());
     const data = await response.json();
 
     if (!data.ok) {
