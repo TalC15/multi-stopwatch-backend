@@ -21,11 +21,20 @@ import {
 } from "./auth.js";
 import supabase from "./db.js";
 import { mountSharedTimers } from "./sharedTimers.js";
+import {
+  createWebAuthGuard, parseAuthOrigins, readRefreshCookie,
+  setRefreshCookie, clearRefreshCookie, webAuthErrorHandler,
+} from "./webAuth.js";
 
 dotenv.config();
 
 const app = express();
-app.use(cors());
+app.use(["/auth/login", "/auth/refresh", "/auth/logout"],
+  createWebAuthGuard(parseAuthOrigins(process.env.AUTH_ALLOWED_ORIGINS)));
+const bearerCors = cors();
+app.use((req, res, next) => req.webAuth ? next() : bearerCors(req, res, next));
+// Trust only the nearest ingress hop, never arbitrary left-most XFF values.
+// Render ingress must append/overwrite XFF; verify the deployed proxy chain.
 app.set("trust proxy", 1);
 app.use(express.json());
 
@@ -93,12 +102,36 @@ function clearFailedAttempts(username) {
 
 // ─── Auth Routes ──────────────────────────────────────────────────────────
 
+// The public sessionId is a concurrency guard, never an authentication proof.
+// Both refresh and logout authenticate exclusively with the signed cookie.
+function webRefreshSession(req, res) {
+  const body = req.body;
+  if (!body || typeof body !== "object" || Array.isArray(body) ||
+      Object.keys(body).length !== 1 || typeof body.sessionId !== "string" ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(body.sessionId)) {
+    res.status(400).json({ error: "Yalnızca sessionId gerekli", code: "AUTH_BODY_INVALID" });
+    return null;
+  }
+  const refreshToken = readRefreshCookie(req);
+  const decoded = refreshToken && verifyToken(refreshToken);
+  if (!decoded || decoded.type !== "refresh" || !decoded.id || !decoded.sessionId) {
+    res.status(401).json({ error: "Geçersiz veya eksik refresh cookie", code: "AUTH_SESSION_INVALID" });
+    return null;
+  }
+  if (decoded.sessionId !== body.sessionId) {
+    // Never clear the cookie on errors: it may belong to a newer login.
+    res.status(409).json({ error: "Oturum değişti", code: "AUTH_SESSION_CHANGED" });
+    return null;
+  }
+  return { refreshToken, decoded };
+}
+
 // Giriş
 app.post("/auth/login", loginLimiter, async (req, res) => {
-  const { username, pin } = req.body;
-
-  if (!username || !pin) {
-    return res.status(400).json({ error: "Kullanıcı adı ve PIN gerekli" });
+  const { username, pin } = req.body ?? {};
+  if (typeof username !== "string" || !username || typeof pin !== "string" || !pin ||
+      Object.keys(req.body).some(key => !["username", "pin"].includes(key))) {
+    return res.status(400).json({ error: "Kullanıcı adı ve PIN gerekli", code: "AUTH_BODY_INVALID" });
   }
 
   if (isLockedOut(username)) {
@@ -114,6 +147,9 @@ app.post("/auth/login", loginLimiter, async (req, res) => {
     .eq("username", username)
     .single();
 
+  if (error && error.code !== "PGRST116") {
+    return res.status(503).json({ error: "Sunucu geçici olarak erişilemiyor" });
+  }
   // Kullanıcı bulunamadı ve PIN hatalı aynı mesajı döner (enumeration önleme)
   if (error || !user) {
     recordFailedAttempt(username);
@@ -144,13 +180,14 @@ app.post("/auth/login", loginLimiter, async (req, res) => {
     if (sessionError.message?.includes("KEEPTIMER_ACCOUNT_DISABLED")) {
       return res.status(401).json({ error: "Kullanıcı adı veya PIN hatalı" });
     }
-    console.error("[auth/login] oturum kaydı oluşturulamadı:", sessionError);
-    return res.status(500).json({ error: "Giriş yapılamadı, tekrar deneyin" });
+    console.error("[auth/login] oturum kaydı oluşturulamadı");
+    return res.status(503).json({ error: "Giriş yapılamadı, tekrar deneyin" });
   }
 
+  setRefreshCookie(res, refreshToken, verifyToken(refreshToken).exp);
   res.json({
     accessToken,
-    refreshToken,
+    sessionId,
     user: {
       id: user.id,
       username: user.username,
@@ -162,15 +199,9 @@ app.post("/auth/login", loginLimiter, async (req, res) => {
 
 // Token yenile
 app.post("/auth/refresh", async (req, res) => {
-  const { refreshToken } = req.body;
-  if (!refreshToken) {
-    return res.status(400).json({ error: "Refresh token gerekli" });
-  }
-
-  const decoded = verifyToken(refreshToken);
-  if (!decoded || decoded.type !== "refresh" || !decoded.sessionId) {
-    return res.status(401).json({ error: "Geçersiz refresh token" });
-  }
+  const current = webRefreshSession(req, res);
+  if (!current) return;
+  const { refreshToken, decoded } = current;
 
   const { data: session, error } = await supabase
     .from("sessions")
@@ -187,7 +218,7 @@ app.post("/auth/refresh", async (req, res) => {
         .status(401)
         .json({ error: "Oturum bulunamadı, tekrar giriş yapın" });
     }
-    console.error("[auth/refresh] Supabase hatası:", error);
+    console.error("[auth/refresh] Oturum okunamadı");
     return res.status(503).json({ error: "Sunucu geçici olarak erişilemiyor" });
   }
 
@@ -228,7 +259,8 @@ app.post("/auth/refresh", async (req, res) => {
     { id: decoded.id },
     decoded.sessionId,
   );
-  res.json({ accessToken });
+  // No refresh rotation and no Set-Cookie: preserve the original absolute expiry.
+  res.json({ accessToken, sessionId: decoded.sessionId });
 });
 
 // A closing worker must not change a shared Telegram job with an HTTP request
@@ -347,22 +379,9 @@ async function deactivateWorker(req, res, id) {
 
 // Çıkış — mevcut oturumu iptal et
 app.post("/auth/logout", async (req, res) => {
-  const { refreshToken } = req.body ?? {};
-
-  if (!refreshToken) {
-    return res.status(400).json({ error: "Refresh token gerekli" });
-  }
-
-  const decoded = verifyToken(refreshToken);
-
-  if (
-    !decoded ||
-    decoded.type !== "refresh" ||
-    !decoded.id ||
-    !decoded.sessionId
-  ) {
-    return res.status(401).json({ error: "Geçersiz refresh token" });
-  }
+  const current = webRefreshSession(req, res);
+  if (!current) return;
+  const { refreshToken, decoded } = current;
 
   const { data: session, error: sessionError } = await supabase
     .from("sessions")
@@ -376,7 +395,7 @@ app.post("/auth/logout", async (req, res) => {
       return res.status(401).json({ error: "Oturum bulunamadı" });
     }
 
-    console.error("[auth/logout] Session okunamadı:", sessionError);
+    console.error("[auth/logout] Session okunamadı");
 
     return res.status(503).json({
       error: "Sunucu geçici olarak erişilemiyor",
@@ -394,8 +413,8 @@ app.post("/auth/logout", async (req, res) => {
   // Logout idempotent olsun.
   if (session.revoked_at) {
     io.in(`session-${session.id}`).disconnectSockets(true);
-
-    return res.json({ success: true });
+    clearRefreshCookie(res);
+    return res.json({ success: true, sessionId: session.id });
   }
 
   const { error: revokeError } = await supabase
@@ -408,7 +427,7 @@ app.post("/auth/logout", async (req, res) => {
     .is("revoked_at", null);
 
   if (revokeError) {
-    console.error("[auth/logout] Session revoke edilemedi:", revokeError);
+    console.error("[auth/logout] Session revoke edilemedi");
 
     return res.status(503).json({
       error: "Çıkış işlemi tamamlanamadı",
@@ -420,7 +439,8 @@ app.post("/auth/logout", async (req, res) => {
   // server tarafından anında kapat.
   io.in(`session-${session.id}`).disconnectSockets(true);
 
-  return res.json({ success: true });
+  clearRefreshCookie(res);
+  return res.json({ success: true, sessionId: session.id });
 });
 
 // ─── Kullanıcı Yönetimi (sadece superadmin ve manager) ───────────────────
@@ -1858,6 +1878,8 @@ io.on("connection", (socket) => {
     );
   });
 });
+
+app.use(webAuthErrorHandler);
 
 const PORT = process.env.PORT || 3000;
 httpServer.listen(PORT, () => {

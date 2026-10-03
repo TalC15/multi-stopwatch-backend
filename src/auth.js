@@ -205,6 +205,6 @@ export async function createSuperAdminIfNotExists() {
   if (error) {
     console.error('[Auth] Superadmin oluşturulamadı:', error);
   } else {
-    console.log('[Auth] Superadmin oluşturuldu — kullanıcı adı: admin, PIN:', pin);
+    console.log('[Auth] Superadmin oluşturuldu — kullanıcı adı: admin');
   }
 }
