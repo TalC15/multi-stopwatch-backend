@@ -8,6 +8,7 @@ test("login, refresh and protected API reject a deactivated worker", async () =>
   process.env.JWT_SECRET = "local-only-company-deactivation-test-secret";
   process.env.SUPABASE_URL = "http://127.0.0.1:54321";
   process.env.SUPABASE_SERVICE_KEY = "local-only-test-key";
+  process.env.AUTH_ALLOWED_ORIGINS = "https://keeptimer.example";
 
   const reservation = createServer().listen(0, "127.0.0.1");
   await once(reservation, "listening");
@@ -45,13 +46,17 @@ test("login, refresh and protected API reject a deactivated worker", async () =>
     if (!httpServer.listening) await once(httpServer, "listening");
     const origin = `http://127.0.0.1:${port}`;
     const post = (path, body) => originalFetch(`${origin}${path}`, {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+      method: "POST", headers: {
+        "Content-Type": "application/json", Origin: "https://keeptimer.example",
+        "X-KeepTimer-CSRF": "1",
+        Cookie: `__Secure-keeptimer-refresh=${refreshToken}`,
+      }, body: JSON.stringify(body),
     });
     const login = await post("/auth/login", { username: "worker", pin: "1234" });
     assert.equal(login.status, 401);
     assert.equal(attemptedSessions, 0);
 
-    const refresh = await post("/auth/refresh", { refreshToken });
+    const refresh = await post("/auth/refresh", { sessionId: ids.session });
     assert.equal(refresh.status, 401);
 
     const access = await originalFetch(`${origin}/timers/personal`, {
