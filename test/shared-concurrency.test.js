@@ -28,7 +28,7 @@ async function setup(t) {
   await admin.query(schema.replace(/CREATE ROLE (anon|authenticated|service_role);/g,''));
   // Match the relevant live metadata additions absent from the historical fixture.
   await admin.query("ALTER TABLE timers ADD COLUMN created_at timestamptz DEFAULT now(), ALTER COLUMN name SET NOT NULL, ALTER COLUMN type SET NOT NULL");
-  for(const name of ['20260925_company_account_deactivation.sql','20260925_personal_sync_api.sql','20260928_shared_authority.sql']) {
+  for(const name of ['20260925_company_account_deactivation.sql','20260925_personal_sync_api.sql','20260928_shared_authority.sql','20261007_subscription_phase1.sql']) {
     await admin.query(await readFile(new URL(`../db/migrations/${name}`,import.meta.url),'utf8'));
   }
   await admin.query("INSERT INTO workspaces(id,name) VALUES($1,'A'),($2,'B')",[ids.company,ids.otherCompany]);
