@@ -25,14 +25,16 @@ import {
   createWebAuthGuard, parseAuthOrigins, readRefreshCookie,
   setRefreshCookie, clearRefreshCookie, webAuthErrorHandler,
 } from "./webAuth.js";
+import { nativeAuthGuard, readBearerRefresh, nativeAuthErrorHandler } from "./nativeAuth.js";
 
 dotenv.config();
 
 const app = express();
 app.use(["/auth/login", "/auth/refresh", "/auth/logout"],
   createWebAuthGuard(parseAuthOrigins(process.env.AUTH_ALLOWED_ORIGINS)));
+app.use("/auth/native", nativeAuthGuard);
 const bearerCors = cors();
-app.use((req, res, next) => req.webAuth ? next() : bearerCors(req, res, next));
+app.use((req, res, next) => req.webAuth || req.nativeAuth ? next() : bearerCors(req, res, next));
 // Trust only the nearest ingress hop, never arbitrary left-most XFF values.
 // Render ingress must append/overwrite XFF; verify the deployed proxy chain.
 app.set("trust proxy", 1);
@@ -103,8 +105,8 @@ function clearFailedAttempts(username) {
 // ─── Auth Routes ──────────────────────────────────────────────────────────
 
 // The public sessionId is a concurrency guard, never an authentication proof.
-// Both refresh and logout authenticate exclusively with the signed cookie.
-function webRefreshSession(req, res) {
+// Both transports share JWT/session checks; only credential extraction differs.
+function refreshSession(req, res) {
   const body = req.body;
   if (!body || typeof body !== "object" || Array.isArray(body) ||
       Object.keys(body).length !== 1 || typeof body.sessionId !== "string" ||
@@ -112,10 +114,13 @@ function webRefreshSession(req, res) {
     res.status(400).json({ error: "Yalnızca sessionId gerekli", code: "AUTH_BODY_INVALID" });
     return null;
   }
-  const refreshToken = readRefreshCookie(req);
+  const refreshToken = req.nativeAuth ? readBearerRefresh(req) : readRefreshCookie(req);
   const decoded = refreshToken && verifyToken(refreshToken);
   if (!decoded || decoded.type !== "refresh" || !decoded.id || !decoded.sessionId) {
-    res.status(401).json({ error: "Geçersiz veya eksik refresh cookie", code: "AUTH_SESSION_INVALID" });
+    res.status(401).json({
+      error: req.nativeAuth ? "Geçersiz veya eksik refresh credential" : "Geçersiz veya eksik refresh cookie",
+      code: "AUTH_SESSION_INVALID",
+    });
     return null;
   }
   if (decoded.sessionId !== body.sessionId) {
@@ -127,7 +132,8 @@ function webRefreshSession(req, res) {
 }
 
 // Giriş
-app.post("/auth/login", loginLimiter, async (req, res) => {
+// One handler, limiter instance and username failure pool for both transports.
+app.post(["/auth/login", "/auth/native/login"], loginLimiter, async (req, res) => {
   const { username, pin } = req.body ?? {};
   if (typeof username !== "string" || !username || typeof pin !== "string" || !pin ||
       Object.keys(req.body).some(key => !["username", "pin"].includes(key))) {
@@ -184,9 +190,10 @@ app.post("/auth/login", loginLimiter, async (req, res) => {
     return res.status(503).json({ error: "Giriş yapılamadı, tekrar deneyin" });
   }
 
-  setRefreshCookie(res, refreshToken, verifyToken(refreshToken).exp);
+  if (!req.nativeAuth) setRefreshCookie(res, refreshToken, verifyToken(refreshToken).exp);
   res.json({
     accessToken,
+    ...(req.nativeAuth ? { refreshToken } : {}),
     sessionId,
     user: {
       id: user.id,
@@ -198,8 +205,8 @@ app.post("/auth/login", loginLimiter, async (req, res) => {
 });
 
 // Token yenile
-app.post("/auth/refresh", async (req, res) => {
-  const current = webRefreshSession(req, res);
+app.post(["/auth/refresh", "/auth/native/refresh"], async (req, res) => {
+  const current = refreshSession(req, res);
   if (!current) return;
   const { refreshToken, decoded } = current;
 
@@ -378,8 +385,8 @@ async function deactivateWorker(req, res, id) {
 }
 
 // Çıkış — mevcut oturumu iptal et
-app.post("/auth/logout", async (req, res) => {
-  const current = webRefreshSession(req, res);
+app.post(["/auth/logout", "/auth/native/logout"], async (req, res) => {
+  const current = refreshSession(req, res);
   if (!current) return;
   const { refreshToken, decoded } = current;
 
@@ -410,9 +417,12 @@ app.post("/auth/logout", async (req, res) => {
     return res.status(401).json({ error: "Geçersiz refresh token" });
   }
 
-  // Logout idempotent olsun.
+  // Preserve web logout retry semantics; native revoked credentials return 401.
   if (session.revoked_at) {
     io.in(`session-${session.id}`).disconnectSockets(true);
+    if (req.nativeAuth) {
+      return res.status(401).json({ error: "Oturum sonlandırılmış, tekrar giriş yapın" });
+    }
     clearRefreshCookie(res);
     return res.json({ success: true, sessionId: session.id });
   }
@@ -439,7 +449,7 @@ app.post("/auth/logout", async (req, res) => {
   // server tarafından anında kapat.
   io.in(`session-${session.id}`).disconnectSockets(true);
 
-  clearRefreshCookie(res);
+  if (!req.nativeAuth) clearRefreshCookie(res);
   return res.json({ success: true, sessionId: session.id });
 });
 
@@ -1880,6 +1890,7 @@ io.on("connection", (socket) => {
 });
 
 app.use(webAuthErrorHandler);
+app.use(nativeAuthErrorHandler);
 
 const PORT = process.env.PORT || 3000;
 httpServer.listen(PORT, () => {

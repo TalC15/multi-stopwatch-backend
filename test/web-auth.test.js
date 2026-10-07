@@ -60,7 +60,7 @@ test("missing origin configuration disables only web auth", async t => {
   assert.equal((await fetch(`${base}/health`)).status, 200);
 });
 
-test("web auth HTTP, proxy, session and Socket.IO contract", { timeout: 60000 }, async t => {
+test("web/native auth HTTP, proxy, session and Socket.IO contract", { timeout: 120000 }, async t => {
   process.env.JWT_SECRET = "only-local-web-auth-test-secret";
   process.env.SUPABASE_URL = "http://127.0.0.1:54321";
   process.env.SUPABASE_SERVICE_KEY = "only-local-test-key";
@@ -159,6 +159,20 @@ test("web auth HTTP, proxy, session and Socket.IO contract", { timeout: 60000 },
     method: "POST", headers: { ...csrfHeaders, "X-Forwarded-For": `198.51.100.${group}`, ...extra }, body: JSON.stringify(body),
   });
   const login = (username = "worker") => request("/auth/login", { username, pin: "1234" });
+  const nativeRequest = async (action, body = {}, headers = {}) => {
+    const response = await originalFetch(`${base}/auth/native/${action}`, {
+      method: "POST", headers: {
+        "Content-Type": "application/json", "X-Forwarded-For": `198.51.100.${group}`, ...headers,
+      }, body: JSON.stringify(body),
+    });
+    assertNoStore(response);
+    assert.equal(response.headers.get("set-cookie"), null);
+    assert.equal(response.headers.get("access-control-allow-origin"), null);
+    assert.equal(response.headers.get("access-control-allow-credentials"), null);
+    return response;
+  };
+  const nativeSession = (action, session, body = { sessionId: session.id }, headers = {}) =>
+    nativeRequest(action, body, { Authorization: `Bearer ${session.token}`, ...headers });
   const makeSession = (role = "worker", id = randomUUID()) => {
     const user = users.get(role);
     const token = auth.generateRefreshToken(user, id);
@@ -479,6 +493,260 @@ test("web auth HTTP, proxy, session and Socket.IO contract", { timeout: 60000 },
     assert.equal((await request("/auth/refresh", { sessionId: body.sessionId }, {
       Origin: "http://localhost:5173", Cookie: header.split(";")[0], "X-Forwarded-Host": "anything.example",
     })).status, 200);
+  });
+  await t.test("native login uses existing JWT lifetimes, DB identity and hashed session storage", async () => {
+    const response = await nativeRequest("login", { username: "worker", pin: "1234" });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.deepEqual(Object.keys(body).sort(), ["accessToken", "refreshToken", "sessionId", "user"]);
+    const access = auth.verifyToken(body.accessToken), refresh = auth.verifyToken(body.refreshToken);
+    assert.equal(access.type, "access");
+    assert.equal(refresh.type, "refresh");
+    assert.equal(access.exp - access.iat, 900);
+    assert.equal(refresh.exp - refresh.iat, 30 * 24 * 60 * 60);
+    assert.equal(access.sessionId, body.sessionId);
+    assert.equal(refresh.sessionId, body.sessionId);
+    assert.equal(refresh.id, users.get("worker").id);
+    assert.deepEqual(body.user, { id: refresh.id, username: "worker", role: "worker", workspace_id: workspaceId });
+    assert.equal(sessions.get(body.sessionId).refresh_token_hash, auth.hashToken(body.refreshToken));
+    assert.equal((await bearerRequest("/telegram/control", { access: body.accessToken })).status, 200);
+  });
+  await t.test("native refresh returns only access/sessionId without rotation and ignores a different cookie", async () => {
+    const session = makeSession(), other = makeSession();
+    const response = await nativeSession("refresh", session, undefined, { Cookie: cookie(other.token) });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.deepEqual(Object.keys(body).sort(), ["accessToken", "sessionId"]);
+    assert.equal(body.sessionId, session.id);
+    assert.equal(auth.verifyToken(body.accessToken).sessionId, session.id);
+    assert.equal(sessions.get(session.id).refresh_token_hash, auth.hashToken(session.token));
+    assert.equal((await nativeSession("refresh", session)).status, 200, "same credential remains usable");
+  });
+  await t.test("native logout revokes/disconnects only its session and leaves the other socket usable", async () => {
+    const session = makeSession(), other = makeSession();
+    const socket = await connectSocket(session.access), otherSocket = await connectSocket(other.access);
+    assert.match(socket.packet, /^40/);
+    assert.match(otherSocket.packet, /^40/);
+    const response = await nativeSession("logout", session, undefined, { Cookie: cookie(other.token) });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { success: true, sessionId: session.id });
+    assert.ok(sessions.get(session.id).revoked_at);
+    assert.equal(sessions.get(other.id).revoked_at, null);
+    assert.equal(writes.length, 1);
+    assert.deepEqual(writes[0].ids, [session.id]);
+    await assertDisconnected(socket);
+    // A live Engine.IO session still accepts polling transport packets.
+    assert.equal((await originalFetch(otherSocket.endpoint, { method: "POST", body: '42["native-session-alive"]' })).status, 200);
+    assert.equal((await nativeSession("refresh", other)).status, 200);
+    assert.equal((await nativeSession("refresh", session)).status, 401);
+    assert.equal((await nativeSession("logout", session)).status, 401);
+  });
+  await t.test("native rejects missing/malformed/expired/forged/access credentials even with valid cookie", async () => {
+    const session = makeSession();
+    const payload = { id: users.get("worker").id, sessionId: session.id, type: "refresh" };
+    const expired = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: -1 });
+    const forged = jwt.sign(payload, "wrong-secret");
+    for (const action of ["refresh", "logout"]) {
+      for (const value of [null, "", "Basic abc", "Bearer broken", `Bearer ${expired}`, `Bearer ${forged}`,
+        `Bearer ${session.access}`, `Bearer ${session.token}, Bearer ${session.token}`]) {
+        const response = await nativeRequest(action, { sessionId: session.id }, {
+          Cookie: cookie(session.token), ...(value === null ? {} : { Authorization: value }),
+          "X-Native": "true", "User-Agent": "KeepTimer Android",
+        });
+        assert.equal(response.status, 401);
+      }
+    }
+    assert.equal(writes.length, 0);
+  });
+  await t.test("native rejects duplicate Authorization headers on the wire", async () => {
+    const session = makeSession();
+    const response = await new Promise((resolve, reject) => {
+      const req = httpRequest(`${base}/auth/native/refresh`, { method: "POST", headers: {
+        "Content-Type": "application/json", Authorization: [`Bearer ${session.token}`, `Bearer ${session.token}`],
+      } }, res => { res.resume(); res.on("end", () => resolve(res)); });
+      req.on("error", reject);
+      req.end(JSON.stringify({ sessionId: session.id }));
+    });
+    assert.equal(response.statusCode, 401);
+    assert.equal(response.headers["set-cookie"], undefined);
+    assert.equal(response.headers["cache-control"], "no-store");
+  });
+  await t.test("native session mismatch is 409 with no mutation", async () => {
+    const session = makeSession(), other = makeSession();
+    for (const action of ["refresh", "logout"]) {
+      const response = await nativeSession(action, session, { sessionId: other.id });
+      assert.equal(response.status, 409);
+      assert.equal((await response.json()).code, "AUTH_SESSION_CHANGED");
+    }
+    assert.equal(writes.length, 0);
+    assert.equal(sessions.get(session.id).revoked_at, null);
+    assert.equal(sessions.get(other.id).revoked_at, null);
+  });
+  await t.test("delayed native A logout cannot revoke a newly logged-in account B", async () => {
+    const a = makeSession();
+    const hold = { reached: deferred(), release: deferred() };
+    heldUpdate = hold;
+    const pending = nativeSession("logout", a);
+    await hold.reached.promise;
+    let b;
+    try {
+      const response = await nativeRequest("login", { username: "manager", pin: "1234" });
+      assert.equal(response.status, 200);
+      b = await response.json();
+    } finally { hold.release.resolve(); }
+    assert.equal((await pending).status, 200);
+    assert.ok(sessions.get(a.id).revoked_at);
+    assert.equal(sessions.get(b.sessionId).revoked_at, null);
+    assert.equal((await nativeSession("refresh", { id: b.sessionId, token: b.refreshToken })).status, 200);
+  });
+  await t.test("native refresh/logout enforce session existence, hash, owner and revocation", async () => {
+    for (const mutate of [row => { sessions.delete(row.id); }, row => { row.refresh_token_hash = "wrong"; },
+      row => { row.user_id = users.get("manager").id; }, row => { row.revoked_at = new Date().toISOString(); }]) {
+      const session = makeSession();
+      mutate(sessions.get(session.id));
+      for (const action of ["refresh", "logout"]) assert.equal((await nativeSession(action, session)).status, 401);
+    }
+    assert.equal(writes.length, 0);
+  });
+  await t.test("native disabled user cannot login or refresh, including DB closure races", async () => {
+    const session = makeSession();
+    users.get("worker").disabled_at = new Date().toISOString();
+    assert.equal((await nativeRequest("login", { username: "worker", pin: "1234" })).status, 401);
+    assert.equal((await nativeSession("refresh", session)).status, 401);
+    users.get("worker").disabled_at = null;
+    failure = { table: "sessions", method: "POST", code: "P0001", message: "KEEPTIMER_ACCOUNT_DISABLED", status: 400 };
+    assert.equal((await nativeRequest("login", { username: "worker", pin: "1234" })).status, 401);
+    failure = { table: "keeptimer_refresh_session", method: "POST", code: "P0001", message: "KEEPTIMER_ACCOUNT_DISABLED", status: 400 };
+    assert.equal((await nativeSession("refresh", session)).status, 401);
+  });
+  await t.test("force logout and account closure invalidate native refresh through existing authority", async () => {
+    const admin = makeSession("superadmin"), session = makeSession();
+    assert.equal((await bearerRequest(`/users/${users.get("worker").id}/force-logout`, admin)).status, 200);
+    assert.equal((await nativeSession("refresh", session)).status, 401);
+    const second = makeSession();
+    assert.equal((await bearerRequest(`/users/${users.get("worker").id}`, admin, "DELETE")).status, 200);
+    assert.equal((await nativeSession("refresh", second)).status, 401);
+  });
+  await t.test("native DB errors are 503, not logout success or invalid-credential responses", async () => {
+    const session = makeSession();
+    for (const [action, table, method] of [["login", "users", "GET"], ["login", "sessions", "POST"],
+      ["refresh", "sessions", "GET"], ["refresh", "keeptimer_refresh_session", "POST"],
+      ["logout", "sessions", "GET"], ["logout", "sessions", "PATCH"]]) {
+      failure = { table, method };
+      const response = action === "login" ? await nativeRequest(action, { username: "worker", pin: "1234" }) :
+        await nativeSession(action, session);
+      assert.equal(response.status, 503);
+    }
+    assert.equal(sessions.get(session.id).revoked_at, null);
+  });
+  await t.test("native errors never log or reflect PIN, body, Authorization, tokens or upstream exceptions", async () => {
+    const session = makeSession(), secret = "PRIVATE-NATIVE-BODY-AND-HEADER";
+    const messages = [], originals = {};
+    for (const method of ["log", "error", "warn", "info", "debug"]) {
+      originals[method] = console[method];
+      console[method] = (...args) => messages.push(args.map(String).join(" "));
+    }
+    const originalHash = users.get("worker").pin_hash;
+    try {
+      const check = async response => {
+        assert.equal(response.status, 503);
+        const text = await response.text();
+        for (const value of [secret, session.token, session.access, "Bearer "]) assert.ok(!text.includes(value));
+      };
+      failure = { table: "sessions", method: "GET", message: `${secret} Bearer ${session.token}` };
+      await check(await nativeSession("refresh", session));
+      await check(await nativeSession("logout", session));
+      failure = null;
+      users.get("worker").pin_hash = 42; // bcrypt exception must be sanitized.
+      await check(await nativeRequest("login", { username: "worker", pin: secret }, { Authorization: `Bearer ${session.token}` }));
+      users.get("worker").pin_hash = originalHash;
+      const success = await nativeRequest("login", { username: "worker", pin: "1234" });
+      assert.equal(success.status, 200);
+      const credentials = await success.json();
+      for (const value of [secret, session.token, session.access, credentials.accessToken, credentials.refreshToken, "Bearer ", "1234"]) {
+        assert.ok(messages.every(message => !message.includes(value)));
+      }
+      assert.ok(messages.some(message => message.includes("[native auth]")), "unexpected error handler was exercised");
+    } finally {
+      users.get("worker").pin_hash = originalHash;
+      for (const method of Object.keys(originals)) console[method] = originals[method];
+    }
+  });
+  await t.test("native body contract rejects extra token fields, invalid session IDs and non-objects", async () => {
+    const session = makeSession();
+    for (const action of ["refresh", "logout"]) {
+      for (const body of [null, [], {}, { sessionId: "bad" }, { sessionId: 1 },
+        { sessionId: session.id, refreshToken: session.token }]) {
+        assert.equal((await nativeSession(action, session, body)).status, 400);
+      }
+    }
+    for (const body of [null, [], {}, { username: {}, pin: "1234" }, { username: "worker", pin: 1234 },
+      { username: "worker", pin: "1234", role: "superadmin" }]) {
+      assert.equal((await nativeRequest("login", body)).status, 400);
+    }
+    assert.equal(writes.length, 0);
+  });
+  await t.test("native parser rejects wrong content type, malformed JSON and oversized body without reflection", async () => {
+    for (const action of ["login", "refresh", "logout"]) {
+      for (const [contentType, body, status] of [["text/plain", "private-body", 415],
+        ["application/x-www-form-urlencoded", "pin=private-body", 415], ["application/json", '{"pin":"private-body",', 400],
+        ["application/json", JSON.stringify({ pin: "private-body".repeat(10000) }), 413]]) {
+        const response = await originalFetch(`${base}/auth/native/${action}`, {
+          method: "POST", headers: { "Content-Type": contentType }, body,
+        });
+        assert.equal(response.status, status);
+        assertNoStore(response);
+        assert.equal(response.headers.get("set-cookie"), null);
+        assert.ok(!(await response.text()).includes("private-body"));
+      }
+    }
+  });
+  await t.test("native rejects every supplied Origin and preflight without granting CORS", async () => {
+    const session = makeSession();
+    for (const action of ["login", "refresh", "logout"]) {
+      for (const suppliedOrigin of [origin, "https://localhost", "https://evil.example", "null", ""]) {
+        const response = await nativeSession(action, session, undefined, { Origin: suppliedOrigin });
+        assert.equal(response.status, 403);
+        assert.equal((await response.json()).code, "AUTH_ORIGIN_REJECTED");
+        const preflight = await originalFetch(`${base}/auth/native/${action}`, { method: "OPTIONS", headers: {
+          Origin: suppliedOrigin, "Access-Control-Request-Method": "POST", "Access-Control-Request-Headers": "authorization,content-type",
+        } });
+        assert.equal(preflight.status, 403);
+        assertNoStore(preflight);
+        assert.equal(preflight.headers.get("access-control-allow-origin"), null);
+      }
+      for (const method of ["GET", "OPTIONS"]) {
+        const response = await originalFetch(`${base}/auth/native/${action}`, { method });
+        assert.equal(response.status, 405);
+        assert.equal(response.headers.get("allow"), "POST");
+        assertNoStore(response);
+      }
+    }
+    assert.equal(writes.length, 0);
+  });
+  await t.test("native and web share username failures even across different IPs", async () => {
+    const username = "native-web-lockout";
+    users.set(username, { ...users.get("worker"), username });
+    try {
+      for (let i = 0; i < 5; i++) {
+        const headers = { "X-Forwarded-For": `192.0.2.${i + 1}` };
+        const body = { username, pin: "wrong" };
+        const response = i % 2 ? await request("/auth/login", body, headers) : await nativeRequest("login", body, headers);
+        assert.equal(response.status, 401);
+      }
+      assert.equal((await nativeRequest("login", { username, pin: "1234" }, { "X-Forwarded-For": "192.0.2.6" })).status, 429);
+      assert.equal((await request("/auth/login", { username, pin: "1234" }, { "X-Forwarded-For": "192.0.2.7" })).status, 429);
+      assert.equal(writes.length, 0);
+    } finally { users.delete(username); }
+  });
+  for (const startNative of [false, true]) await t.test(`web/native switching shares IP limit (native first: ${startNative})`, async () => {
+    for (let i = 0; i < 12; i++) {
+      const headers = { "X-Forwarded-For": `203.0.113.${i + 1}, 198.51.100.${group}`, "X-Real-IP": `203.0.113.${i + 1}` };
+      const body = { username: `native-ip-${group}-${i}`, pin: "wrong" };
+      const response = Boolean(i % 2) === startNative ? await request("/auth/login", body, headers) : await nativeRequest("login", body, headers);
+      assert.equal(response.status, i < 10 ? 401 : 429);
+      assertNoStore(response);
+    }
   });
   await t.test("wrong PIN and username lockout are retained", async () => {
     for (let i = 0; i < 5; i++) {
