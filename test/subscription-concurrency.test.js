@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { database, connect, localTestUrl, user, subscription } from './support/subscriptionDatabase.js';
+import { database, connect, localTestUrl, user, subscription } from './support/subscriptionPhase2.js';
 
 const options = { skip: localTestUrl() ? false : 'Requires disposable local SUBSCRIPTION_TEST_DATABASE_URL' };
 

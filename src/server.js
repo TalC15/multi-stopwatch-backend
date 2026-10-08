@@ -8,7 +8,7 @@ import { Server } from "socket.io";
 import { scheduleTimer, cancelTimer } from "./timers.js";
 import { sendTelegramMessage } from "./telegram.js";
 import {
-  authenticate,
+  authenticate as authenticateIdentity,
   authorize,
   createSuperAdminIfNotExists,
   hashPin,
@@ -20,6 +20,7 @@ import {
   validateAccessToken,
 } from "./auth.js";
 import supabase from "./db.js";
+import { createSubscriptionCore } from "./subscriptions.js";
 import { mountSharedTimers } from "./sharedTimers.js";
 import {
   createWebAuthGuard, parseAuthOrigins, readRefreshCookie,
@@ -30,6 +31,11 @@ import { nativeAuthGuard, readBearerRefresh, nativeAuthErrorHandler } from "./na
 dotenv.config();
 
 const app = express();
+const subscriptionCore = createSubscriptionCore(supabase);
+// Authentication remains credential/session-only. Protected resource scope is
+// independently checked against current DB state, never access-token claims.
+const authenticate = (req, res, next) => authenticateIdentity(req, res,
+  () => subscriptionCore.guardCurrentAccountScope(req, res, next));
 app.use(["/auth/login", "/auth/refresh", "/auth/logout"],
   createWebAuthGuard(parseAuthOrigins(process.env.AUTH_ALLOWED_ORIGINS)));
 app.use("/auth/native", nativeAuthGuard);
@@ -39,6 +45,7 @@ app.use((req, res, next) => req.webAuth || req.nativeAuth ? next() : bearerCors(
 // Render ingress must append/overwrite XFF; verify the deployed proxy chain.
 app.set("trust proxy", 1);
 app.use(express.json());
+app.get('/account/subscription', authenticateIdentity, subscriptionCore.getSubscription);
 
 // HTTP server oluştur — Socket.io bunun üzerine kurulacak
 const httpServer = createServer(app);
@@ -1832,6 +1839,13 @@ io.use(async (socket, next) => {
       message: result.error,
     };
 
+    return next(error);
+  }
+
+  const scopeError = await subscriptionCore.currentAccountScopeError(result.user.id);
+  if (scopeError) {
+    const error = new Error('account_scope_denied');
+    error.data = { status: scopeError.status, ...scopeError.body };
     return next(error);
   }
 

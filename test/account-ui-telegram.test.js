@@ -1,3 +1,4 @@
+import { legacySubscriptionResponse } from './support/subscriptionHttp.js';
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:net";
@@ -34,6 +35,7 @@ test("active management lists exclude closed users; Telegram IDs stay scoped to 
       return originalFetch(request, options);
     }
     const table = url.pathname.split("/").at(-1);
+    if (table === "keeptimer_resolve_entitlement") return legacySubscriptionResponse();
     const method = options?.method || request.method || "GET";
     const rowId = eq(url, "id");
     let data;

@@ -1,3 +1,4 @@
+import { legacySubscriptionResponse } from './support/subscriptionHttp.js';
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:net";
@@ -31,6 +32,7 @@ test("pending personal Telegram job is cancelled and callback checks current arc
       return originalFetch(request, options);
     }
     const table = url.pathname.split("/").at(-1);
+    if (table === "keeptimer_resolve_entitlement") return legacySubscriptionResponse();
     let result;
     if (table === "keeptimer_close_company_worker") {
       assert.equal(JSON.parse(options.body).p_actor_id, ids.manager);

@@ -1,3 +1,4 @@
+import { legacySubscriptionResponse } from './support/subscriptionHttp.js';
 import test from "node:test";
 import assert from "node:assert/strict";
 import { once } from "node:events";
@@ -85,6 +86,7 @@ test("web/native auth HTTP, proxy, session and Socket.IO contract", { timeout: 1
       return originalFetch(request, options);
     }
     const table = url.pathname.split("/").at(-1);
+    if (table === "keeptimer_resolve_entitlement") return legacySubscriptionResponse();
     const method = options.method || request.method || "GET";
     const body = options.body ? JSON.parse(options.body) : null;
     if (failure?.table === table && (!failure.method || failure.method === method)) {
