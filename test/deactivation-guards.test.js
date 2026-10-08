@@ -1,3 +1,4 @@
+import { legacySubscriptionResponse } from './support/subscriptionHttp.js';
 
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -62,6 +63,7 @@ test("Phase 2B: deactivation guards", async t => {
     }
 
     const table = url.pathname.split("/").at(-1);
+    if (table === "keeptimer_resolve_entitlement") return legacySubscriptionResponse();
     let data;
 
     if (table === "users") {

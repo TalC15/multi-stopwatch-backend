@@ -1,3 +1,4 @@
+import { legacySubscriptionResponse } from './support/subscriptionHttp.js';
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:net";
@@ -52,6 +53,7 @@ test("a closing worker cannot reschedule or cancel a shared Telegram job", async
     }
 
     const table = url.pathname.split("/").at(-1);
+    if (table === "keeptimer_resolve_entitlement") return legacySubscriptionResponse();
     const rowId = eq(url, "id");
     let data;
     if (table === "keeptimer_close_company_worker") {

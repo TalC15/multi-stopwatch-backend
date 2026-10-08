@@ -76,7 +76,7 @@ test('subscription Phase 1: database invariants and existing authority', async t
     assert.equal((await db.query("SELECT CASE WHEN cancelled_at IS NOT NULL THEN 'cancelled' WHEN ends_at<=now() THEN 'expired' ELSE 'active' END AS status FROM subscriptions WHERE id=$1", [row.id])).rows[0].status, 'expired');
     assert.deepEqual((await db.query('SELECT * FROM timers WHERE id=$1', [timerId])).rows, before);
     assert.equal((await db.query('SELECT disabled_at FROM users WHERE id=$1', [row.user_id])).rows[0].disabled_at, null);
-    await rejectsCode(() => db.query('DELETE FROM users WHERE id=$1', [row.user_id]), '23503');
+    await assert.rejects(() => db.query('DELETE FROM users WHERE id=$1', [row.user_id]), e => ['23001', '23503'].includes(e.code));
     assert.deepEqual((await db.query('SELECT * FROM timers WHERE id=$1', [timerId])).rows, before);
   });
   await t.test('private workspace discriminator, owner, invite and shared flags', async () => {
@@ -128,7 +128,7 @@ test('subscription Phase 1: database invariants and existing authority', async t
       await db.query('INSERT INTO admin_audit_log(actor_user_id,action,target_user_id) VALUES($1,$2,$1)', [owner, action]);
     }
     for (const sql of ["UPDATE admin_audit_log SET action='password_reset'", 'DELETE FROM admin_audit_log', 'TRUNCATE admin_audit_log']) await rejectsCode(() => db.exec(sql), '42501');
-    await rejectsCode(() => db.query('DELETE FROM users WHERE id=$1', [owner]), '23503');
+    await assert.rejects(() => db.query('DELETE FROM users WHERE id=$1', [owner]), e => ['23001', '23503'].includes(e.code));
   });
   await t.test('existing company/workspace guards stop timer cascades', async () => {
     const workspace = (await db.query("INSERT INTO workspaces(name) VALUES('Team') RETURNING id")).rows[0].id;

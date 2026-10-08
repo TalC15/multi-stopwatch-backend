@@ -58,6 +58,7 @@ export async function fixture(t) {
   await db.exec(schema);
   await db.exec(await readFile(new URL("../../db/migrations/20260925_company_account_deactivation.sql", import.meta.url), "utf8"));
   await db.exec(await readFile(new URL("../../db/migrations/20261007_subscription_phase1.sql", import.meta.url), "utf8"));
+  await db.exec(await readFile(new URL("../../db/migrations/20261008_subscription_entitlement_core.sql", import.meta.url), "utf8"));
   await db.query("INSERT INTO workspaces(id,name) VALUES($1,'A'),($2,'B')", [ids.company, ids.otherCompany]);
   for (const [name, role, workspace] of [
     ["manager", "manager", ids.company],

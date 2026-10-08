@@ -1,3 +1,4 @@
+import { legacySubscriptionResponse } from './support/subscriptionHttp.js';
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:net";
@@ -21,6 +22,7 @@ test("personal pages include explicit terminal rows and continue beyond Supabase
     const url = new URL(request.url ?? request);
     if (url.port !== "54321") return originalFetch(request, options);
     const table = url.pathname.split("/").at(-1);
+    if (table === "keeptimer_resolve_entitlement") return legacySubscriptionResponse();
     let data;
     if (table === "users") data = url.searchParams.has("role") ? { id: ids.superadmin } :
       { id: ids.worker, role: "worker", workspace_id: workspace, disabled_at: null };

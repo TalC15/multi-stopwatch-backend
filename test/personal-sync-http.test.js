@@ -1,3 +1,4 @@
+import { legacySubscriptionResponse } from './support/subscriptionHttp.js';
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:net";
@@ -24,6 +25,7 @@ test("old timer routes remain usable; new personal routes trust the session scop
       return originalFetch(request, options);
     }
     const table = url.pathname.split("/").at(-1);
+    if (table === "keeptimer_resolve_entitlement") return legacySubscriptionResponse();
     const method = options.method || request.method || "GET";
     let data;
     if (table === "users") {

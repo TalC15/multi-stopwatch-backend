@@ -1,3 +1,4 @@
+import { legacySubscriptionResponse } from './support/subscriptionHttp.js';
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:net";
@@ -30,6 +31,7 @@ test("login, refresh and protected API reject a deactivated worker", async () =>
       return originalFetch(request, options);
     }
     const table = url.pathname.split("/").at(-1);
+    if (table === "keeptimer_resolve_entitlement") return legacySubscriptionResponse();
     if (table === "sessions" && (options?.method || request.method) === "POST") attemptedSessions++;
     const result = table === "keeptimer_refresh_session" ? false : table === "sessions"
       ? { id: ids.session, user_id: ids.worker,
