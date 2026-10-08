@@ -32,6 +32,7 @@ async function setup(t) {
   await admin.query(schema.replace(/CREATE ROLE (anon|authenticated|service_role);/g, ""));
   await admin.query(await readFile(new URL("../db/migrations/20260925_company_account_deactivation.sql", import.meta.url), "utf8"));
   await admin.query(await readFile(new URL("../db/migrations/20260925_personal_sync_api.sql", import.meta.url), "utf8"));
+  await admin.query(await readFile(new URL("../db/migrations/20261007_subscription_phase1.sql", import.meta.url), "utf8"));
   await admin.query("INSERT INTO workspaces(id,name) VALUES ($1,'A'),($2,'B')", [ids.company, ids.otherCompany]);
   for (const [id, name, role, workspace] of [
     [ids.manager, "manager", "manager", ids.company],
