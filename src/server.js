@@ -21,6 +21,7 @@ import {
 } from "./auth.js";
 import supabase from "./db.js";
 import { createSubscriptionCore } from "./subscriptions.js";
+import { mountSubscriptionSales } from "./subscriptionSales.js";
 import { mountSharedTimers } from "./sharedTimers.js";
 import {
   createWebAuthGuard, parseAuthOrigins, readRefreshCookie,
@@ -35,10 +36,13 @@ const subscriptionCore = createSubscriptionCore(supabase);
 // Authentication remains credential/session-only. Protected resource scope is
 // independently checked against current DB state, never access-token claims.
 const authenticate = (req, res, next) => authenticateIdentity(req, res,
-  () => subscriptionCore.guardCurrentAccountScope(req, res, next));
+  () => req.user.role === 'agent'
+    ? res.status(403).json({ code: 'AGENT_MANAGEMENT_ONLY', error: 'Yalnız web yönetim işlemleri kullanılabilir' })
+    : subscriptionCore.guardCurrentAccountScope(req, res, next));
 app.use(["/auth/login", "/auth/refresh", "/auth/logout"],
   createWebAuthGuard(parseAuthOrigins(process.env.AUTH_ALLOWED_ORIGINS)));
 app.use("/auth/native", nativeAuthGuard);
+app.use(['/admin/agents','/agent/customers'], (req, _res, next) => { req.webAuth = true; next(); });
 const bearerCors = cors();
 app.use((req, res, next) => req.webAuth || req.nativeAuth ? next() : bearerCors(req, res, next));
 // Trust only the nearest ingress hop, never arbitrary left-most XFF values.
@@ -46,6 +50,8 @@ app.use((req, res, next) => req.webAuth || req.nativeAuth ? next() : bearerCors(
 app.set("trust proxy", 1);
 app.use(express.json());
 app.get('/account/subscription', authenticateIdentity, subscriptionCore.getSubscription);
+mountSubscriptionSales({ app, authenticate: authenticateIdentity, db: supabase,
+  origins: parseAuthOrigins(process.env.AUTH_ALLOWED_ORIGINS) });
 
 // HTTP server oluştur — Socket.io bunun üzerine kurulacak
 const httpServer = createServer(app);
@@ -169,7 +175,10 @@ app.post(["/auth/login", "/auth/native/login"], loginLimiter, async (req, res) =
     return res.status(401).json({ error: "Kullanıcı adı veya PIN hatalı" });
   }
 
-  const pinValid = await verifyPin(pin, user.pin_hash);
+  // Password login and privileged web MFA issuance are not shipped in Phase 3.
+  // Never accept the legacy PIN route for an agent or a new password account.
+  const pinValid = user.role !== 'agent' && user.credential_kind !== 'password' &&
+    await verifyPin(pin, user.pin_hash);
   if (!pinValid || user.disabled_at) {
     recordFailedAttempt(username);
     return res.status(401).json({ error: "Kullanıcı adı veya PIN hatalı" });
@@ -250,6 +259,12 @@ app.post(["/auth/refresh", "/auth/native/refresh"], async (req, res) => {
 
   if (session.refresh_token_hash !== hashToken(refreshToken)) {
     return res.status(401).json({ error: "Geçersiz refresh token" });
+  }
+
+  const credential = await supabase.from('users').select('role, credential_kind').eq('id', decoded.id).single();
+  if (credential.error || !credential.data) return res.status(503).json({ code: 'AUTH_UNAVAILABLE', error: 'Oturum yenilenemedi' });
+  if (credential.data.role === 'agent' || credential.data.credential_kind === 'password') {
+    return res.status(401).json({ code: 'PASSWORD_LOGIN_NOT_READY', error: 'Yeni parola oturumu henüz kullanıma açık değil' });
   }
 
   const { data: refreshedSession, error: refreshUpdateError } =
@@ -1842,6 +1857,11 @@ io.use(async (socket, next) => {
     return next(error);
   }
 
+  if (result.user.role === 'agent') {
+    const error = new Error('agent_management_only');
+    error.data = { status: 403, code: 'AGENT_MANAGEMENT_ONLY' };
+    return next(error);
+  }
   const scopeError = await subscriptionCore.currentAccountScopeError(result.user.id);
   if (scopeError) {
     const error = new Error('account_scope_denied');
