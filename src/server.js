@@ -21,6 +21,7 @@ import {
 } from "./auth.js";
 import supabase from "./db.js";
 import { createSubscriptionCore } from "./subscriptions.js";
+import { createAccountExperience, privateScopeFailure } from "./accountExperience.js";
 import { mountSubscriptionSales } from "./subscriptionSales.js";
 import { mountSharedTimers } from "./sharedTimers.js";
 import {
@@ -33,6 +34,11 @@ dotenv.config();
 
 const app = express();
 const subscriptionCore = createSubscriptionCore(supabase);
+const accountExperience = createAccountExperience(supabase, subscriptionCore);
+const authenticatePersonal = write => (req, res, next) => authenticateIdentity(req, res,
+  () => req.user.role === 'agent'
+    ? res.status(403).json({ code: 'AGENT_MANAGEMENT_ONLY', error: 'Yalnız web yönetim işlemleri kullanılabilir' })
+    : accountExperience.guard(write)(req, res, next));
 // Authentication remains credential/session-only. Protected resource scope is
 // independently checked against current DB state, never access-token claims.
 const authenticate = (req, res, next) => authenticateIdentity(req, res,
@@ -50,6 +56,7 @@ app.use((req, res, next) => req.webAuth || req.nativeAuth ? next() : bearerCors(
 app.set("trust proxy", 1);
 app.use(express.json());
 app.get('/account/subscription', authenticateIdentity, subscriptionCore.getSubscription);
+app.get('/account/experience', authenticateIdentity, accountExperience.getExperience);
 mountSubscriptionSales({ app, authenticate: authenticateIdentity, db: supabase,
   origins: parseAuthOrigins(process.env.AUTH_ALLOWED_ORIGINS) });
 
@@ -662,10 +669,10 @@ app.post(
 // ─── Telegram Routes ──────────────────────────────────────────────────────
 
 // Telegram chat ID kaydet
-app.post("/register", authenticate, async (req, res) => {
+app.post("/register", authenticatePersonal(true), async (req, res) => {
   const { chatId } = req.body;
 
-  if (!chatId) {
+  if (typeof chatId !== 'string' || !/^-?\d{1,20}$/.test(chatId)) {
     return res.status(400).json({ error: "chatId gerekli" });
   }
 
@@ -686,11 +693,14 @@ app.post("/register", authenticate, async (req, res) => {
     return res.status(500).json({ error: "Telegram doğrulaması başarısız" });
   }
 
-  const { error: registerError } = await supabase
+  const { error: registerError } = req.accountScope.kind === 'individual'
+    ? await supabase.rpc('keeptimer_phase5_telegram', { p_actor: req.user.id, p_chat_id: chatId, p_session_id: req.sessionId })
+    : await supabase
     .from("users")
     .update({ telegram_chat_id: chatId })
     .eq("id", req.user.id);
 
+  if (registerError && req.accountScope.kind === 'individual') return personalSyncError(res, registerError);
   if (registerError)
     return res.status(409).json({ error: "Telegram bağlantısı kaydedilemedi" });
 
@@ -963,6 +973,11 @@ const validMs = value => Number.isSafeInteger(value) && value >= 0;
 
 function personalSyncError(res, error) {
   const code = error?.message || "";
+  if (code === 'AUTH_SESSION_INVALID') return res.status(401).json({ code, error: 'Oturum doğrulanamadı' });
+  if (/^(ACCOUNT_DISABLED|SUBSCRIPTION_|PLAN_DISABLED|INDIVIDUAL_SCOPE_NOT_READY)/.test(code)) {
+    const denied = privateScopeFailure(error);
+    return res.status(denied.status).json(denied.body);
+  }
   if (code.includes("KEEPTIMER_ACCOUNT_DISABLED")) {
     return res.status(401).json({ error: "Hesap kapatılmış" });
   }
@@ -1033,7 +1048,7 @@ function parsePersonalState(body) {
 
 // Complete snapshots use an expected revision and stable mutation UUID. SQL
 // verifies the current account and timer under row locks before any write.
-app.put("/timers/personal/:id", authenticate, async (req, res) => {
+app.put("/timers/personal/:id", authenticatePersonal(true), async (req, res) => {
   const body = parseSyncIdentity(req);
   const state = body && parsePersonalState(body);
   if (!state) return res.status(400).json({ error: "Geçersiz kişisel timer durumu" });
@@ -1042,12 +1057,13 @@ app.put("/timers/personal/:id", authenticate, async (req, res) => {
     p_actor_id: req.user.id, p_timer_id: req.params.id,
     p_mutation_id: body.mutationId,
     p_expected_revision: body.expectedRevision, p_state: state,
+    ...(req.accountScope.kind === 'individual' ? { p_session_id: req.sessionId } : {}),
   });
   if (error || !data) return personalSyncError(res, error);
   return res.status(data.created ? 201 : 200).json({ success: true, ...data });
 });
 
-app.delete("/timers/personal/:id", authenticate, async (req, res) => {
+app.delete("/timers/personal/:id", authenticatePersonal(true), async (req, res) => {
   const body = parseSyncIdentity(req);
   if (!body || Object.keys(body).some(key => ![
     "dataMode", "mutationId", "expectedRevision",
@@ -1058,6 +1074,7 @@ app.delete("/timers/personal/:id", authenticate, async (req, res) => {
     p_actor_id: req.user.id, p_timer_id: req.params.id,
     p_mutation_id: body.mutationId,
     p_expected_revision: body.expectedRevision,
+    ...(req.accountScope.kind === 'individual' ? { p_session_id: req.sessionId } : {}),
   });
   if (error || !data) return personalSyncError(res, error);
   return res.json({ success: true, ...data });
@@ -1423,7 +1440,7 @@ app.get("/timers/shared", authenticate, async (req, res) => {
 });
 
 // Mevcut kullanıcının kendi workspace-personal timer'larını getir
-app.get("/timers/personal", authenticate, async (req, res) => {
+app.get("/timers/personal", authenticatePersonal(false), async (req, res) => {
   const workspaceId = req.user.workspace_id;
   const userId = req.user.id;
 
@@ -1484,7 +1501,7 @@ app.get("/timers/personal", authenticate, async (req, res) => {
 // ─── Timer Routes ─────────────────────────────────────────────────────────
 
 // Timer başlat - Telegram bildirimi planla
-app.post("/timer/start", authenticate, async (req, res) => {
+app.post("/timer/start", authenticatePersonal(true), async (req, res) => {
   const { timerId, timerName, endsAt } = req.body;
 
   if (!timerId || !timerName || !endsAt) {
@@ -1560,6 +1577,8 @@ app.post("/timer/start", authenticate, async (req, res) => {
   }
   if (existing.is_shared) return sharedUpdateRequired(res);
 
+  try { await accountExperience.scope(currentActor.user, true); }
+  catch (error) { const denied = error?.body ? error : privateScopeFailure(); return res.status(denied.status).json(denied.body); }
 
   scheduleTimer(
     req.user.id,
@@ -1650,6 +1669,10 @@ app.post("/timer/start", authenticate, async (req, res) => {
         return;
       }
 
+      // Scheduling-time authority cannot survive subscription expiry. Resolve
+      // again at delivery; a failure drops the message, never the timer data.
+      try { await accountExperience.scope({ id: timer.user_id, role: 'worker', workspace_id: owner.workspace_id }, true); }
+      catch { return; }
       await sendTelegramMessage(owner.telegram_chat_id, messageText);
     },
   );
@@ -1687,6 +1710,14 @@ app.post("/timer/start", authenticate, async (req, res) => {
   }
 
   // Telegram bağlı olmasa bile HTTP isteği düzgün kapanır.
+  if (req.accountScope.kind === 'individual') {
+    try { await accountExperience.scope(currentActor.user, true); }
+    catch (error) {
+      cancelTimer(timerId);
+      const denied = error?.body ? error : privateScopeFailure();
+      return res.status(denied.status).json(denied.body);
+    }
+  }
   res.json({
     success: true,
     scheduled: true,
@@ -1695,7 +1726,7 @@ app.post("/timer/start", authenticate, async (req, res) => {
 
 // Timer iptal
 // Timer iptal
-app.post("/timer/cancel", authenticate, async (req, res) => {
+app.post("/timer/cancel", authenticatePersonal(false), async (req, res) => {
   const { timerId } = req.body;
 
   if (!timerId) {
@@ -1770,7 +1801,7 @@ app.post("/timer/cancel", authenticate, async (req, res) => {
 });
 
 // telegram bağlantısını kaldır/chatID'yi sil
-app.patch("/telegram/cancel", authenticate, async (req, res) => {
+app.patch("/telegram/cancel", authenticatePersonal(false), async (req, res) => {
   try {
     // Eski istemciler user_id gönderir; yetkiyi yalnız doğrulanmış oturum belirler.
     if (req.body?.user_id != null && req.body.user_id !== req.user.id) {
@@ -1778,7 +1809,9 @@ app.patch("/telegram/cancel", authenticate, async (req, res) => {
         .status(403)
         .json({ error: "Başka kullanıcının Telegram bağlantısı yönetilemez" });
     }
-    const { error } = await supabase
+    const { error } = req.accountScope.kind === 'individual'
+      ? await supabase.rpc('keeptimer_phase5_telegram', { p_actor: req.user.id, p_chat_id: null, p_session_id: req.sessionId })
+      : await supabase
       .from("users")
       .update({ telegram_chat_id: null })
       .eq("id", req.user.id);
@@ -1793,7 +1826,8 @@ app.patch("/telegram/cancel", authenticate, async (req, res) => {
 });
 
 // telegram chatID çekme
-app.post("/telegram/control", authenticate, async (req, res) => {
+app.post("/telegram/control", authenticatePersonal(false), async (req, res) => {
+  res.set('Cache-Control', 'no-store');
   try {
     if (req.body?.user_id != null && req.body.user_id !== req.user.id) {
       return res

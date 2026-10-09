@@ -12,10 +12,11 @@ const failures = Object.freeze({
   SUBSCRIPTION_UNAVAILABLE: [503, 'Abonelik doğrulanamadı'],
 });
 
-function failure(code) {
+export function subscriptionFailure(code) {
   const [status, error] = failures[code] || failures.SUBSCRIPTION_UNAVAILABLE;
   return { status, body: { error, code: Object.hasOwn(failures, code) ? code : 'SUBSCRIPTION_UNAVAILABLE' } };
 }
+const failure = subscriptionFailure;
 
 // PostgreSQL JSON timestamps carry up to six fractional digits. Parse whole
 // seconds separately, then add the fraction as integer microseconds after UTC
@@ -33,7 +34,7 @@ function timestampMicros(value) {
   return BigInt(milliseconds) * 1000n + BigInt((match[3] || '').padEnd(6, '0'));
 }
 
-function valid(result) {
+export function validSubscriptionEntitlement(result) {
   if (!result || typeof result !== 'object' || Array.isArray(result) ||
       typeof result.isEntitled !== 'boolean' || typeof result.requiresSubscription !== 'boolean' ||
       !(result.code === null || (typeof result.code === 'string' && Object.hasOwn(failures, result.code))) ||
@@ -60,12 +61,13 @@ export function createSubscriptionCore(db) {
     let response;
     try { response = await db.rpc('keeptimer_resolve_entitlement', { p_user_id: userId }); }
     catch { throw failure('SUBSCRIPTION_UNAVAILABLE'); }
-    if (response?.error || !valid(response?.data)) throw failure('SUBSCRIPTION_UNAVAILABLE');
+    if (response?.error || !validSubscriptionEntitlement(response?.data)) throw failure('SUBSCRIPTION_UNAVAILABLE');
     return response.data;
   }
 
   // Existing group/standalone routes must not become an accidental paid fallback.
-  // Private scope stays closed until Phase 3 installs membership/provisioning rules.
+  // Phase 5 opens only separately guarded personal routes; this company/shared
+  // and Socket.IO guard still keeps private accounts out.
   async function currentAccountScopeError(userId) {
     try {
       const result = await resolveSubscriptionEntitlement(userId);
