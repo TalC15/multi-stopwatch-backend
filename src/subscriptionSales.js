@@ -59,6 +59,10 @@ function subscriptionResult(value) {
   if (startsAt===null || endsAt===null || endsAt<=startsAt ||
       (item.cancelledAt===null ? item.cancelledBy!==null || item.cancellationReason!==null :
         timestampMicros(item.cancelledAt)===null || item.cancelledBy===null)) throw fail('SALES_UNAVAILABLE');
+  if (value.status !== undefined) {
+    if (!['pending','active','expired','cancelled'].includes(value.status)) throw fail('SALES_UNAVAILABLE');
+    item.status = value.status;
+  }
   return item;
 }
 function commandResult(action,value) {
@@ -76,6 +80,7 @@ function commandResult(action,value) {
   return result;
 }
 function password(value) {
+  // eslint-disable-next-line no-control-regex -- Reject password control characters as required by the API.
   if (typeof value !== 'string' || [...value].length < 16 || Buffer.byteLength(value, 'utf8') > 72 || /[\u0000-\u001f\u007f]/.test(value)) {
     throw fail('SALES_INPUT_INVALID');
   }
