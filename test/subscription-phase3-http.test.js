@@ -80,7 +80,7 @@ test('Phase 3 real backend HTTP, synthetic DB proof, closed login and secret han
     assert.doesNotMatch(JSON.stringify(created),/password|pin_hash|mfa_email|refresh_token/);
     assert.equal((await db.query('SELECT count(*)::int n FROM keeptimer_individual_customers')).rows[0].n,1);
   });
-  await t.test('renewal/cancel/history use exact customer and do not open resource scope',async()=>{
+  await t.test('renewal/cancel/history use exact customer and do not open company resource scope',async()=>{
     const res=await call(a,`/agent/customers/${customer}/subscriptions`,{termMonths:1,amountMinor:10000,currency:'TRY'});
     assert.equal(res.status,200);const renewal=await res.json();assert.equal(renewal.subscription.startsAt,subscription.endsAt);
     const cancel=await call(a,`/agent/customers/${customer}/subscriptions/${renewal.subscription.id}/cancel`,{reason:'customer_request'});
@@ -89,7 +89,7 @@ test('Phase 3 real backend HTTP, synthetic DB proof, closed login and secret han
     const page=await history.json();assert.equal(page.items.length,1);assert.match(page.nextCursor,/^[a-f0-9-]{36}$/);
     const session=randomUUID();await db.query('INSERT INTO sessions(id,user_id,refresh_token_hash) VALUES($1,$2,$3)',[session,customer,'fixture']);
     tokens.set(customer,auth.generateAccessToken({id:customer},session));
-    const resource=await call({id:customer},'/timers/personal');assert.equal(resource.status,403);assert.equal((await resource.json()).code,'INDIVIDUAL_SCOPE_NOT_READY');
+    const resource=await call({id:customer},'/workspace');assert.equal(resource.status,403);assert.equal((await resource.json()).code,'INDIVIDUAL_SCOPE_NOT_READY');
     const agentResource=await call(a,'/workspace');assert.equal(agentResource.status,403);assert.equal((await agentResource.json()).code,'AGENT_MANAGEMENT_ONLY');
   });
   await t.test('new customers and agents cannot use web/native PIN login or native refresh',async()=>{
