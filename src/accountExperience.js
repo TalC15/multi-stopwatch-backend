@@ -51,7 +51,7 @@ export function createAccountExperience(db, subscriptions) {
       const paid = current.kind === 'company' || e.isEntitled;
       res.json({ account: { kind: current.kind, userId: current.userId, workspaceId: current.workspaceId },
         subscription: { planCode: e.planCode, status: e.status, startsAt: e.startsAt, endsAt: e.endsAt, isEntitled: e.isEntitled },
-        code: e.code, features: { tts: paid, telegram: paid, presets: paid },
+        evaluatedAt: e.evaluatedAt ?? null, code: e.code, features: { tts: paid, telegram: paid, presets: paid },
         personal: { readable: Boolean(current.workspaceId), writable: Boolean(current.workspaceId) && paid },
         shared: current.kind === 'company', loginReady: false });
     } catch (error) {
