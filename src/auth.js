@@ -66,7 +66,7 @@ export async function validateAccessToken(token) {
     const [userResult, sessionResult] = await Promise.all([
       supabase
         .from("users")
-        .select("id, username, role, workspace_id, disabled_at")
+        .select("id, username, role, workspace_id, disabled_at, credential_kind")
         .eq("id", decoded.id)
         .single(),
 
@@ -125,16 +125,21 @@ export async function validateAccessToken(token) {
       };
     }
 
+    if (['superadmin','agent'].includes(userResult.data.role) || userResult.data.credential_kind === 'password') {
+      const proof = await supabase.rpc('keeptimer_auth_session', {
+        p_user: decoded.id, p_session: decoded.sessionId, p_transport: null, p_refresh: null,
+      });
+      if (proof.error) return { ok: false, status: 503, error: 'Güvenli oturum doğrulanamadı' };
+      if (proof.data !== true) return { ok: false, status: 401, error: 'Oturum doğrulanamadı; yeniden giriş yapın' };
+    }
+
     return {
       ok: true,
       user: userResult.data,
       sessionId: decoded.sessionId,
     };
-  } catch (err) {
-    console.error(
-      "[validateAccessToken] beklenmeyen hata:",
-      err,
-    );
+  } catch {
+    console.error("[validateAccessToken] doğrulama kullanılamıyor");
 
     return {
       ok: false,
@@ -191,7 +196,8 @@ export async function createSuperAdminIfNotExists() {
     return;
   }
 
-  const pin = process.env.SUPERADMIN_PIN || '1234';
+  const pin = process.env.SUPERADMIN_PIN;
+  if (!pin) return; // No default credential. This legacy bootstrap cannot log in in Phase 7.
   const pin_hash = await hashPin(pin);
 
   const { error } = await supabase

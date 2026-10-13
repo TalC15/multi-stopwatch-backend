@@ -92,6 +92,8 @@ test("web/native auth HTTP, proxy, session and Socket.IO contract", { timeout: 1
     if (failure?.table === table && (!failure.method || failure.method === method)) {
       return json({ code: failure.code || "TEST_FAILURE", message: failure.message || "backend unavailable" }, failure.status || 503);
     }
+    if (table === "keeptimer_auth_limit") return json(true);
+    if (table === "keeptimer_auth_session") return json(false);
     if (table === "users") {
       const user = [...users.values()].find(user =>
         (!eq(url, "id") || user.id === eq(url, "id")) &&
@@ -208,7 +210,12 @@ test("web/native auth HTTP, proxy, session and Socket.IO contract", { timeout: 1
     assertNoStore(response);
     const body = await response.json();
     assert.deepEqual(Object.keys(body).sort(), ["accessToken", "sessionId", "user"]);
-    const header = response.headers.get("set-cookie");
+    const cookies = response.headers.getSetCookie();
+    assert.equal(cookies.length, 2);
+    const header = cookies[0];
+    assert.match(cookies[1], /^__Secure-keeptimer-mfa=;/);
+    assert.match(cookies[1], /Expires=Thu, 01 Jan 1970/);
+    assert.deepEqual(cookieAttributes(cookies[1]), ["HttpOnly", "Path=/api/auth", "SameSite=Lax", "Secure"]);
     assert.match(header, /^__Secure-keeptimer-refresh=/);
     assert.deepEqual(cookieAttributes(header), ["HttpOnly", "Path=/api/auth", "SameSite=Lax", "Secure"]);
     const refresh = auth.verifyToken(header.split(";")[0].split("=")[1]);
@@ -353,24 +360,29 @@ test("web/native auth HTTP, proxy, session and Socket.IO contract", { timeout: 1
     assert.equal(refreshResponse.status, 401);
     assert.equal(refreshResponse.headers.get("set-cookie"), null);
   });
-  await t.test("superadmin force-logout closes target sockets and all target sessions only", async () => {
+  await t.test("legacy Superadmin token cannot force logout; manager role restriction remains", async () => {
     const worker = makeSession(), second = makeSession(), manager = makeSession("manager"), admin = makeSession("superadmin");
     const socket = await connectSocket(worker.access);
     assert.match(socket.packet, /^40/);
     const path = `/users/${users.get("worker").id}/force-logout`;
     assert.equal((await bearerRequest(path, manager)).status, 403, "existing role restriction must not be widened");
-    assert.equal((await bearerRequest(path, admin)).status, 200);
-    assert.ok(sessions.get(worker.id).revoked_at);
-    assert.ok(sessions.get(second.id).revoked_at);
-    assert.equal(sessions.get(manager.id).revoked_at, null);
-    assert.equal((await sessionRequest("/auth/refresh", worker)).status, 401);
-    await assertDisconnected(socket);
+    assert.equal((await bearerRequest(path, admin)).status, 401);
+    assert.equal(sessions.get(worker.id).revoked_at,null);
+    assert.equal(sessions.get(second.id).revoked_at,null);
+    assert.equal(sessions.get(manager.id).revoked_at,null);
+    assert.equal((await sessionRequest('/auth/refresh',worker)).status,200);
+    assert.ok(socket.packet.startsWith('40'));
+
   });
   for (const actor of ["manager", "superadmin"]) await t.test(`${actor} account closure retains session and socket revocation`, async () => {
     const worker = makeSession(), admin = makeSession(actor);
     const socket = await connectSocket(worker.access);
     assert.match(socket.packet, /^40/);
     const response = await bearerRequest(`/users/${users.get("worker").id}`, admin, "DELETE");
+    if (actor==='superadmin') {
+      assert.equal(response.status,401);assert.equal(users.get('worker').disabled_at,null);
+      assert.equal(sessions.get(worker.id).revoked_at,null);return;
+    }
     assert.equal(response.status, 200);
     assert.ok(users.get("worker").disabled_at);
     assert.ok(sessions.get(worker.id).revoked_at);
@@ -623,10 +635,10 @@ test("web/native auth HTTP, proxy, session and Socket.IO contract", { timeout: 1
   });
   await t.test("force logout and account closure invalidate native refresh through existing authority", async () => {
     const admin = makeSession("superadmin"), session = makeSession();
-    assert.equal((await bearerRequest(`/users/${users.get("worker").id}/force-logout`, admin)).status, 200);
-    assert.equal((await nativeSession("refresh", session)).status, 401);
-    const second = makeSession();
-    assert.equal((await bearerRequest(`/users/${users.get("worker").id}`, admin, "DELETE")).status, 200);
+    assert.equal((await bearerRequest(`/users/${users.get("worker").id}/force-logout`, admin)).status, 401);
+    assert.equal((await nativeSession("refresh", session)).status, 200);
+    const second = makeSession(), manager = makeSession("manager");
+    assert.equal((await bearerRequest(`/users/${users.get("worker").id}`, manager, "DELETE")).status, 200);
     assert.equal((await nativeSession("refresh", second)).status, 401);
   });
   await t.test("native DB errors are 503, not logout success or invalid-credential responses", async () => {

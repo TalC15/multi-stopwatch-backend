@@ -49,11 +49,17 @@ export function createAccountExperience(db, subscriptions) {
     try {
       const current = await scope(req.user), e = current.entitlement;
       const paid = current.kind === 'company' || e.isEntitled;
+      let loginReady=false;
+      if(req.user.credential_kind==='password') {
+        const readiness=await db.rpc('keeptimer_auth_command',{p_action:'status',p_data:{user_id:req.user.id}});
+        if(readiness?.error || readiness?.data?.ok!==true || typeof readiness.data.loginReady!=='boolean') throw failure('SUBSCRIPTION_UNAVAILABLE');
+        loginReady=readiness.data.loginReady;
+      }
       res.json({ account: { kind: current.kind, userId: current.userId, workspaceId: current.workspaceId },
         subscription: { planCode: e.planCode, status: e.status, startsAt: e.startsAt, endsAt: e.endsAt, isEntitled: e.isEntitled },
         evaluatedAt: e.evaluatedAt ?? null, code: e.code, features: { tts: paid, telegram: paid, presets: paid },
         personal: { readable: Boolean(current.workspaceId), writable: Boolean(current.workspaceId) && paid },
-        shared: current.kind === 'company', loginReady: false });
+        shared: current.kind === 'company', loginReady });
     } catch (error) {
       const denied = error?.body ? error : failure('SUBSCRIPTION_UNAVAILABLE');
       res.status(denied.status).json(denied.body);

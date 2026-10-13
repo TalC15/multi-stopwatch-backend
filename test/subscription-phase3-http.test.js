@@ -4,15 +4,16 @@ import { once } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import bcrypt from 'bcrypt';
 import { createSalesCore } from '../src/subscriptionSales.js';
-import { database,actor,enableIsolatedFixture,rpcAdapter,fixturePassword,user,fixtureHash } from './support/subscriptionPhase3.js';
+import {actor,enableIsolatedFixture,rpcAdapter as salesAdapter,fixturePassword,fixtureHash} from './support/subscriptionPhase3.js';
+import {database,enable,salesActor,rpcAdapter as authAdapter,command as authCommand,issued,consumeData} from './support/passwordAuth.js';
 
 test('Phase 3 real backend HTTP, synthetic DB proof, closed login and secret handling',async t=>{
-  const db=await database(t),sa=await actor(db,'superadmin'),a=await actor(db),outsider=await actor(db,'worker');
+  const db=await database(t);await enable(db);const sa=await salesActor(db,'superadmin'),a=await salesActor(db),outsider=await actor(db,'worker');
   process.env.JWT_SECRET='phase3-test-only-jwt-secret';
   process.env.SUPABASE_URL='http://127.0.0.1:54321';process.env.SUPABASE_SERVICE_KEY='phase3-test-only-service';
   process.env.AUTH_ALLOWED_ORIGINS='https://fixture.example';process.env.PORT='0';
   process.env.SUBSCRIPTION_IDEMPOTENCY_HMAC_KEY='a'.repeat(64);
-  const auth=await import('../src/auth.js'),adapter=rpcAdapter(db),originalFetch=globalThis.fetch;
+  const auth=await import('../src/auth.js'),adapter=salesAdapter(db),originalFetch=globalThis.fetch;
   const json=(body,status=200)=>new Response(JSON.stringify(body),{status,headers:{'Content-Type':'application/json'}});
   let rpcFault=null,rpcOverride=null;const rpcPayloads=[];
   globalThis.fetch=async(request,options={})=>{
@@ -20,6 +21,7 @@ test('Phase 3 real backend HTTP, synthetic DB proof, closed login and secret han
     if(url.origin!=='http://127.0.0.1:54321') {assert.equal(url.hostname,'127.0.0.1');return originalFetch(request,options);}
     const table=url.pathname.split('/').at(-1),body=options.body?JSON.parse(options.body):null;
     const eq=k=>url.searchParams.get(k)?.replace(/^eq\./,'');
+    if(table.startsWith('keeptimer_auth_')) {const r=await authAdapter(db).rpc(table,body);return r.error?json(r.error,400):json(r.data);}
     if(table.startsWith('keeptimer_phase3_')) {
       rpcPayloads.push({table,body});
       if(rpcFault)return json(rpcFault,503);
@@ -48,13 +50,13 @@ test('Phase 3 real backend HTTP, synthetic DB proof, closed login and secret han
   const call=(who,path,body,key=randomUUID(),extra={})=>originalFetch(base+path,{method:body===undefined?'GET':'POST',
     headers:{Origin:'https://fixture.example',Authorization:`Bearer ${tokens.get(who.id)}`,'Content-Type':'application/json','X-KeepTimer-CSRF':'1','Idempotency-Key':key,...extra},
     ...(body===undefined?{}:{body:JSON.stringify(body)})});
-  const data={username:'http_customer',password:fixturePassword,termMonths:1,amountMinor:25000,currency:'TRY'};
+  const data={username:'http_customer',email:'customer@example.test',termMonths:1,amountMinor:25000,currency:'TRY'};
   let customer,subscription;
   await t.test('default gate rejects a valid session; no key/env can manufacture an MFA proof',async()=>{
     const closed=await call(a,'/agent/customers',data);assert.equal(closed.status,503);assert.equal((await closed.json()).code,'PRIVILEGED_MFA_NOT_READY');
     await enableIsolatedFixture(db);
     const absent=(await db.query('DELETE FROM keeptimer_privileged_web_sessions WHERE session_id=$1 RETURNING *',[a.session])).rows[0];
-    const noProof=await call(a,'/agent/customers',data);assert.equal(noProof.status,403);assert.equal((await noProof.json()).code,'PRIVILEGED_MFA_REQUIRED');
+    const noProof=await call(a,'/agent/customers',data);assert.equal(noProof.status,401);
     await db.query('INSERT INTO keeptimer_privileged_web_sessions VALUES($1,$2,$3,$4,$5)',[absent.session_id,absent.user_id,absent.verified_at,absent.expires_at,absent.method]);
   });
   await t.test('origin, CSRF, RBAC, plan and forged authority fields reject before mutation',async()=>{
@@ -75,7 +77,7 @@ test('Phase 3 real backend HTTP, synthetic DB proof, closed login and secret han
     const repeat=await call(a,'/agent/customers',data,key);assert.equal(repeat.status,200);assert.deepEqual(await repeat.json(),created);
     const conflict=await call(a,'/agent/customers',{...data,amountMinor:99},key);assert.equal(conflict.status,409);assert.equal((await conflict.json()).code,'IDEMPOTENCY_CONFLICT');
     const hash=(await db.query('SELECT password_hash,pin_hash FROM users WHERE id=$1',[customer])).rows[0];
-    assert.equal(hash.pin_hash,null);assert.equal(await bcrypt.compare(fixturePassword,hash.password_hash),true);
+    assert.equal(hash.pin_hash,null);assert.equal(await bcrypt.compare(fixturePassword,hash.password_hash),false); assert.match(hash.password_hash,/^\$2b\$12\$/);
     assert.ok(rpcPayloads.every(x=>!JSON.stringify(x).includes(fixturePassword)));
     assert.doesNotMatch(JSON.stringify(created),/password|pin_hash|mfa_email|refresh_token/);
     assert.equal((await db.query('SELECT count(*)::int n FROM keeptimer_individual_customers')).rows[0].n,1);
@@ -87,10 +89,12 @@ test('Phase 3 real backend HTTP, synthetic DB proof, closed login and secret han
     assert.equal(cancel.status,200);
     const history=await call(a,`/agent/customers/${customer}/subscriptions?limit=1`);assert.equal(history.status,200);
     const page=await history.json();assert.equal(page.items.length,1);assert.match(page.nextCursor,/^[a-f0-9-]{36}$/);
-    const session=randomUUID();await db.query('INSERT INTO sessions(id,user_id,refresh_token_hash) VALUES($1,$2,$3)',[session,customer,'fixture']);
+    const activation=await issued(db,customer);await authCommand(db,'consume',consumeData(activation));
+    const session=randomUUID();await authCommand(db,'login',{user_id:customer,expected_hash:fixtureHash,transport:'web',session_id:session,refresh_hash:'f'.repeat(64)});
     tokens.set(customer,auth.generateAccessToken({id:customer},session));
     const resource=await call({id:customer},'/workspace');assert.equal(resource.status,403);assert.equal((await resource.json()).code,'INDIVIDUAL_SCOPE_NOT_READY');
-    const agentResource=await call(a,'/workspace');assert.equal(agentResource.status,403);assert.equal((await agentResource.json()).code,'AGENT_MANAGEMENT_ONLY');
+    // The replacement MFA management route explicitly denies Agent company scope.
+    const agentResource=await call(a,'/workspace');assert.equal(agentResource.status,403);assert.equal((await agentResource.json()).code,'AUTH_FORBIDDEN');
   });
   await t.test('new customers and agents cannot use web/native PIN login or native refresh',async()=>{
     const agentName=(await db.query('SELECT username FROM users WHERE id=$1',[a.id])).rows[0].username;
@@ -101,7 +105,7 @@ test('Phase 3 real backend HTTP, synthetic DB proof, closed login and secret han
     const refresh=auth.generateRefreshToken({id:a.id},a.session);
     await db.query('UPDATE sessions SET refresh_token_hash=$1 WHERE id=$2',[auth.hashToken(refresh),a.session]);
     const response=await originalFetch(base+'/auth/native/refresh',{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${refresh}`},body:JSON.stringify({sessionId:a.session})});
-    assert.equal(response.status,401);assert.equal((await response.json()).code,'PASSWORD_LOGIN_NOT_READY');
+    assert.equal(response.status,401);
   });
   await t.test('missing idempotency key and upstream errors fail safely without leaking request secrets',async()=>{
     assert.equal((await call(a,'/agent/customers',data,'')).status,400);

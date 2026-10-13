@@ -50,6 +50,7 @@ test('Phase 2 real backend HTTP + DB authority; credentials remain independent',
       if (fault) return json(fault);
       return json(await resolve(db, body.p_user_id));
     }
+    if (table === 'keeptimer_auth_limit') return json(true); // Company PIN compatibility fixture.
     if (table === 'users') {
       const result = await db.query('SELECT * FROM users WHERE ($1::uuid IS NULL OR id=$1) AND ($2::text IS NULL OR role=$2) AND ($3::text IS NULL OR username=$3)', [eq('id') || null, eq('role') || null, eq('username') || null]);
       return result.rows[0] ? json(result.rows[0]) : json({ code: 'PGRST116' }, 406);

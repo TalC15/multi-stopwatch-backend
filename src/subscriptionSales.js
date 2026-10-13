@@ -1,5 +1,6 @@
+import { normalizeAuthEmail } from './passwordAuth.js';
 import bcrypt from 'bcrypt';
-import { createHmac } from 'node:crypto';
+import { createHmac, randomBytes } from 'node:crypto';
 import cors from 'cors';
 import rateLimit from 'express-rate-limit';
 
@@ -69,7 +70,7 @@ function commandResult(action,value) {
   if (action==='customer_create'||action==='subscription_renew'||action==='subscription_cancel') {
     const result=project(value,action==='subscription_cancel'?['customerId','subscription']:['customerId','subscription','loginReady']);
     result.subscription=subscriptionResult(result.subscription);
-    if (result.customerId!==result.subscription.customerId || action!=='subscription_cancel'&&result.loginReady!==false) throw fail('SALES_UNAVAILABLE');
+    if (result.customerId!==result.subscription.customerId || action==='customer_create'&&result.loginReady!==false || action==='subscription_renew'&&typeof result.loginReady!=='boolean') throw fail('SALES_UNAVAILABLE');
     return result;
   }
   const fields=action==='agent_create'?['agentId','mustChangePassword','loginReady']:
@@ -78,13 +79,6 @@ function commandResult(action,value) {
   if(typeof target!=='string'||!uuid.test(target)||
     (action==='agent_revoke'?result.disabled!==true:result.mustChangePassword!==true||result.loginReady!==false)) throw fail('SALES_UNAVAILABLE');
   return result;
-}
-function password(value) {
-  // eslint-disable-next-line no-control-regex -- Reject password control characters as required by the API.
-  if (typeof value !== 'string' || [...value].length < 16 || Buffer.byteLength(value, 'utf8') > 72 || /[\u0000-\u001f\u007f]/.test(value)) {
-    throw fail('SALES_INPUT_INVALID');
-  }
-  return value;
 }
 function sale(body) {
   if (body.planCode !== undefined && body.planCode !== 'individual') throw fail('PLAN_NOT_AVAILABLE');
@@ -95,7 +89,7 @@ function sale(body) {
 }
 function account(body) {
   if (typeof body.username !== 'string' || !/^[A-Za-z0-9_.-]{3,25}$/.test(body.username)) throw fail('SALES_INPUT_INVALID');
-  return { username: body.username, password: password(body.password) };
+  return { username: body.username };
 }
 
 // Password-bearing bodies are never stored, returned, or logged. The HMAC key
@@ -123,10 +117,8 @@ export function createSalesCore(db) {
     if (typeof key !== 'string' || !/^(?:[a-f0-9]{2}){32,64}$/i.test(key)) throw fail('SALES_UNAVAILABLE');
     const fingerprint = createHmac('sha256', Buffer.from(key, 'hex')).update(JSON.stringify({ action, data })).digest('hex');
     const payload = { ...data };
-    if (Object.hasOwn(payload, 'password')) {
-      payload.password_hash = await bcrypt.hash(password(payload.password), 12);
-      delete payload.password;
-    }
+    if (Object.hasOwn(payload, 'password') || Object.hasOwn(payload, 'password_hash')) throw fail('SALES_INPUT_INVALID');
+    if (['agent_create','customer_create'].includes(action)) payload.password_hash = await bcrypt.hash(randomBytes(32).toString('base64url'),12);
     const result = await rpc('keeptimer_phase3_command', {
       p_actor: id(actor), p_session: id(session), p_request: id(request), p_action: action,
       p_fingerprint: fingerprint, p_data: payload,
@@ -181,14 +173,15 @@ export function mountSubscriptionSales({ app, authenticate, db, origins }) {
     } catch (error) { sendError(res,error); }
   });
   write('/admin/agents','superadmin','agent_create', body => {
-    exact(body,['username','password','mfaEmail']);
+    exact(body,['username','mfaEmail']);
     if (typeof body.mfaEmail!=='string' || body.mfaEmail.length>254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(body.mfaEmail)) throw fail('SALES_INPUT_INVALID');
-    return { ...account(body), mfa_email: body.mfaEmail.toLowerCase() };
+    const email = normalizeAuthEmail(body.mfaEmail);
+    return { ...account(body), mfa_email: email, email };
   });
   write('/admin/agents/:id/revoke','superadmin','agent_revoke', (body,params) => { exact(body,[]); return { agent_id:id(params.id) }; });
   write('/agent/customers','agent','customer_create', body => {
-    exact(body,['username','password','termMonths','amountMinor','currency'],['planCode']);
-    return { ...account(body), ...sale(body) };
+    exact(body,['username','email','termMonths','amountMinor','currency'],['planCode']);
+    return { ...account(body), email: normalizeAuthEmail(body.email), ...sale(body) };
   });
   write('/agent/customers/:id/subscriptions','agent','subscription_renew', (body,params) => {
     exact(body,['termMonths','amountMinor','currency'],['planCode']);
@@ -199,10 +192,10 @@ export function mountSubscriptionSales({ app, authenticate, db, origins }) {
     if (!['customer_request','payment_record_correction','administrative'].includes(body.reason)) throw fail('SALES_INPUT_INVALID');
     return { customer_id:id(params.id), subscription_id:id(params.subscriptionId), reason:body.reason };
   });
-  for (const [base,role,action,key] of [['/admin/agents','superadmin','agent_password_reset','agent_id'],
-    ['/agent/customers','agent','customer_password_reset','customer_id']]) {
-    write(base+'/:id/password-reset',role,action,(body,params) => { exact(body,['password']); return { [key]:id(params.id), password:password(body.password) }; });
-  }
+  // Password recovery is mailbox-owner initiated via /auth/reset/request.
+  // An administrator/Agent cannot supply or learn the replacement password.
+  app.post(['/admin/agents/:id/password-reset','/agent/customers/:id/password-reset'], (_req,res) =>
+    res.status(403).json({code:'SALES_FORBIDDEN',error:'Parolayı yalnız hesap sahibi e-posta doğrulamasıyla sıfırlayabilir'}));
   for (const [path,role,kind] of [['/admin/agents','superadmin','agents'],['/agent/customers','agent','customers'],
     ['/agent/customers/:id/subscriptions','agent','history']]) app.get(path, async (req,res) => {
     try {
