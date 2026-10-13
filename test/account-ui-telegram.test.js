@@ -36,6 +36,7 @@ test("active management lists exclude closed users; Telegram IDs stay scoped to 
     }
     const table = url.pathname.split("/").at(-1);
     if (table === "keeptimer_resolve_entitlement") return legacySubscriptionResponse();
+    if(table==="keeptimer_auth_session")return new Response("false",{headers:{"Content-Type":"application/json"}});
     const method = options?.method || request.method || "GET";
     const rowId = eq(url, "id");
     let data;
@@ -92,17 +93,14 @@ test("active management lists exclude closed users; Telegram IDs stay scoped to 
     assert.deepEqual(workers.body.users.map(u => u.id).sort(), [ids.manager, ids.worker].sort());
 
     const allActive = await request("GET", "/admin/users", ids.superadmin);
-    assert.equal(allActive.status, 200);
-    assert.equal(allActive.body.users.some(u => u.id === closedId), false);
-    assert.equal(allActive.body.users.some(u => u.id === ids.outsider), true);
+    assert.equal(allActive.status,401); // Legacy privileged session has no MFA.
 
     const members = await request("GET", `/admin/workspaces/${ids.company}`, ids.superadmin);
-    assert.equal(members.status, 200);
-    assert.equal(members.body.members.some(u => u.id === closedId), false);
+    assert.equal(members.status,401);
 
     const promoted = await request("PATCH", `/admin/users/${ids.worker}`, ids.superadmin,
       { username: "worker", role: "manager", workspace_id: ids.company });
-    assert.equal(promoted.status, 409);
+    assert.equal(promoted.status,401);
     assert.equal(users.get(ids.worker).role, "worker");
     assert.equal((await request("POST", "/workspace/leave", ids.manager, {})).status, 403);
     assert.equal((await request("POST", "/workspace/join", ids.worker, { inviteCode: "LOCAL1" })).status, 403);

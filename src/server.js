@@ -22,6 +22,8 @@ import {
 import supabase from "./db.js";
 import { createSubscriptionCore } from "./subscriptions.js";
 import { createAccountExperience, privateScopeFailure } from "./accountExperience.js";
+import { mountPasswordAuth } from "./passwordAuth.js";
+import { mountPrivilegedManagement } from "./privilegedManagement.js";
 import { mountSubscriptionSales } from "./subscriptionSales.js";
 import { mountSharedTimers } from "./sharedTimers.js";
 import {
@@ -36,16 +38,16 @@ const app = express();
 const subscriptionCore = createSubscriptionCore(supabase);
 const accountExperience = createAccountExperience(supabase, subscriptionCore);
 const authenticatePersonal = write => (req, res, next) => authenticateIdentity(req, res,
-  () => req.user.role === 'agent'
-    ? res.status(403).json({ code: 'AGENT_MANAGEMENT_ONLY', error: 'Yalnız web yönetim işlemleri kullanılabilir' })
+  () => ['agent','superadmin'].includes(req.user.role)
+    ? res.status(403).json({ code: req.user.role==='agent'?'AGENT_MANAGEMENT_ONLY':'PRIVILEGED_MANAGEMENT_ONLY', error: 'Yalnız güvenli web yönetim işlemleri kullanılabilir' })
     : accountExperience.guard(write)(req, res, next));
 // Authentication remains credential/session-only. Protected resource scope is
 // independently checked against current DB state, never access-token claims.
 const authenticate = (req, res, next) => authenticateIdentity(req, res,
-  () => req.user.role === 'agent'
-    ? res.status(403).json({ code: 'AGENT_MANAGEMENT_ONLY', error: 'Yalnız web yönetim işlemleri kullanılabilir' })
+  () => ['agent','superadmin'].includes(req.user.role)
+    ? res.status(403).json({ code: req.user.role==='agent'?'AGENT_MANAGEMENT_ONLY':'PRIVILEGED_MANAGEMENT_ONLY', error: 'Yalnız güvenli web yönetim işlemleri kullanılabilir' })
     : subscriptionCore.guardCurrentAccountScope(req, res, next));
-app.use(["/auth/login", "/auth/refresh", "/auth/logout"],
+app.use(["/auth/login", "/auth/refresh", "/auth/logout", "/auth/password-login", "/auth/mfa", "/auth/activation", "/auth/reset", "/auth/password", "/auth/sessions"],
   createWebAuthGuard(parseAuthOrigins(process.env.AUTH_ALLOWED_ORIGINS)));
 app.use("/auth/native", nativeAuthGuard);
 app.use(['/admin/agents','/agent/customers'], (req, _res, next) => { req.webAuth = true; next(); });
@@ -60,8 +62,22 @@ app.get('/account/experience', authenticateIdentity, accountExperience.getExperi
 mountSubscriptionSales({ app, authenticate: authenticateIdentity, db: supabase,
   origins: parseAuthOrigins(process.env.AUTH_ALLOWED_ORIGINS) });
 
+const passwordAuth = mountPasswordAuth({ app, db: supabase, authenticate: authenticateIdentity,
+  tokens: { generateAccessToken, generateRefreshToken, hashToken, verifyToken } });
+mountPrivilegedManagement({app,db:supabase,authenticate:authenticateIdentity,
+  origins:parseAuthOrigins(process.env.AUTH_ALLOWED_ORIGINS),onRevoke:id=>io.in(`user-${id}`).disconnectSockets(true)});
+// Legacy privileged management routes have no transactional session/MFA parameter.
+// Keep them closed until they are converted to guarded RPCs. Company managers
+// keep their existing routes. Legacy privileged reads are also closed until their RPC conversion.
+app.use(async (req, res, next) => {
+  if (!/^\/(?:users|workspaces|workspace)(?:\/|$)/.test(req.path)) return next();
+  return authenticateIdentity(req,res,() => ['superadmin','agent'].includes(req.user.role)
+    ? res.status(403).json({code:'PRIVILEGED_LEGACY_CLOSED',error:'Bu yönetim işlemi güvenli geçiş için kapalı'}) : next());
+});
+
 // HTTP server oluştur — Socket.io bunun üzerine kurulacak
 const httpServer = createServer(app);
+httpServer.once('close', passwordAuth.stopWorker);
 const io = new Server(httpServer, {
   cors: { origin: "*" }, // şimdilik herkese açık, ileride kısıtlarız
 });
@@ -160,6 +176,18 @@ app.post(["/auth/login", "/auth/native/login"], loginLimiter, async (req, res) =
     return res.status(400).json({ error: "Kullanıcı adı ve PIN gerekli", code: "AUTH_BODY_INVALID" });
   }
 
+  // Shared DB budget; domain-separated HMAC derived from the existing JWT key
+  // keeps company PIN configuration unchanged and stores no IP/name plaintext.
+  try {
+    const key = process.env.JWT_SECRET;
+    if (!key) throw new Error();
+    const digest = value => crypto.createHmac('sha256', key).update(JSON.stringify(value)).digest('hex');
+    const budget = await supabase.rpc('keeptimer_auth_limit', { p_kind: 'pin',
+      p_account: digest(['phase7-pin','account',username]), p_ip: digest(['phase7-pin','ip',req.ip]) });
+    if (budget.error) throw new Error();
+    if (budget.data !== true) return res.status(429).json({code:'AUTH_RATE_LIMITED',error:'Çok fazla deneme'});
+  } catch { return res.status(503).json({code:'AUTH_UNAVAILABLE',error:'Giriş şu anda kullanılamıyor'}); }
+
   if (isLockedOut(username)) {
     return res.status(429).json({
       error:
@@ -184,7 +212,7 @@ app.post(["/auth/login", "/auth/native/login"], loginLimiter, async (req, res) =
 
   // Password login and privileged web MFA issuance are not shipped in Phase 3.
   // Never accept the legacy PIN route for an agent or a new password account.
-  const pinValid = user.role !== 'agent' && user.credential_kind !== 'password' &&
+  const pinValid = ['worker','manager'].includes(user.role) && user.credential_kind !== 'password' &&
     await verifyPin(pin, user.pin_hash);
   if (!pinValid || user.disabled_at) {
     recordFailedAttempt(username);
@@ -270,16 +298,13 @@ app.post(["/auth/refresh", "/auth/native/refresh"], async (req, res) => {
 
   const credential = await supabase.from('users').select('role, credential_kind').eq('id', decoded.id).single();
   if (credential.error || !credential.data) return res.status(503).json({ code: 'AUTH_UNAVAILABLE', error: 'Oturum yenilenemedi' });
-  if (credential.data.role === 'agent' || credential.data.credential_kind === 'password') {
-    return res.status(401).json({ code: 'PASSWORD_LOGIN_NOT_READY', error: 'Yeni parola oturumu henüz kullanıma açık değil' });
-  }
-
-  const { data: refreshedSession, error: refreshUpdateError } =
-    await supabase.rpc("keeptimer_refresh_session", {
-      p_user_id: decoded.id,
-      p_session_id: decoded.sessionId,
-      p_token_hash: hashToken(refreshToken),
-    });
+  const passwordSession = ['superadmin','agent'].includes(credential.data.role) || credential.data.credential_kind === 'password';
+  const { data: refreshedSession, error: refreshUpdateError } = passwordSession
+    ? await supabase.rpc('keeptimer_auth_session', { p_user: decoded.id, p_session: decoded.sessionId,
+        p_transport: req.nativeAuth ? 'native' : 'web', p_refresh: hashToken(refreshToken) })
+    : await supabase.rpc("keeptimer_refresh_session", {
+        p_user_id: decoded.id, p_session_id: decoded.sessionId, p_token_hash: hashToken(refreshToken),
+      });
 
   if (refreshUpdateError?.message?.includes("KEEPTIMER_ACCOUNT_DISABLED")) {
     return res.status(401).json({ error: "Hesap kapatılmış" });
@@ -377,7 +402,7 @@ async function deactivateWorker(req, res, id) {
 
     // The network may fail after the DB commits. Fail visibly, but if the
     // account is in fact closed, still perform the in-memory cleanup.
-    const { data: closed, error: lookupError } = await supabase
+    const { data: closed } = await supabase
       .from("users")
       .select("workspace_id, disabled_at")
       .eq("id", id)
@@ -1891,9 +1916,9 @@ io.use(async (socket, next) => {
     return next(error);
   }
 
-  if (result.user.role === 'agent') {
-    const error = new Error('agent_management_only');
-    error.data = { status: 403, code: 'AGENT_MANAGEMENT_ONLY' };
+  if (['superadmin','agent'].includes(result.user.role)) {
+    const error = new Error('privileged_web_only');
+    error.data = { status: 403, code: 'PRIVILEGED_WEB_ONLY' };
     return next(error);
   }
   const scopeError = await subscriptionCore.currentAccountScopeError(result.user.id);

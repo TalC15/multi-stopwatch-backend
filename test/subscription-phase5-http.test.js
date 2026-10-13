@@ -3,15 +3,22 @@ import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import jwt from 'jsonwebtoken';
-import { database, actor, user, seededCustomer, put, resolve, scope } from './support/subscriptionPhase5.js';
+import { actor, user, seededCustomer, resolve, scope } from './support/subscriptionPhase5.js';
+
+import {database,enable,rpcAdapter,ready} from './support/passwordAuth.js';
 
 test('Phase 5 real HTTP: private ownership, strict authority, Telegram and closed company/socket/login paths', async t => {
-  const db = await database(t), admin = await actor(db, 'superadmin'), agent = await actor(db);
+  const db=await database(t);await enable(db);const admin=await actor(db,'superadmin'),agent=await actor(db);
   const accounts = {};
   for (const [name, period] of [['active', { starts_at: '2000-01-01Z', ends_at: '2100-01-01Z' }],
     ['other', { starts_at: '2000-01-01Z', ends_at: '2100-01-01Z' }],
     ['expired', { starts_at: '2000-01-01Z', ends_at: '2001-01-01Z' }],
     ['pending', { starts_at: '2100-01-01Z', ends_at: '2101-01-01Z' }]]) accounts[name] = await seededCustomer(db, agent, period);
+  for(const [name,a] of Object.entries(accounts)) {
+    await db.query('INSERT INTO keeptimer_auth_accounts(user_id,email) VALUES($1,$2)',[a.id,`${name}@example.test`]);
+    await ready(db,a.id);
+    await db.query("INSERT INTO keeptimer_auth_sessions VALUES($1,$2,1,'web',clock_timestamp()+interval '30 days')",[a.session,a.id]);
+  }
   accounts.company = { id: await user(db), session: randomUUID() };
   await db.query('INSERT INTO sessions(id,user_id,refresh_token_hash) VALUES($1,$2,$3)', [accounts.company.session, accounts.company.id, 'fixture']);
   process.env.JWT_SECRET = 'phase5-only-test-signing-secret'; process.env.SUPABASE_URL = 'http://127.0.0.1:54321';
@@ -27,6 +34,7 @@ test('Phase 5 real HTTP: private ownership, strict authority, Telegram and close
     if (url.origin !== 'http://127.0.0.1:54321') { assert.equal(url.hostname, '127.0.0.1', 'No live services'); return original(request, options); }
     const table = url.pathname.split('/').at(-1), eq = key => url.searchParams.get(key)?.replace(/^eq\./, '');
     try {
+      if (table.startsWith('keeptimer_auth_')) {const r=await rpcAdapter(db).rpc(table,body);return r.error?json(r.error,400):json(r.data);}
       if (table === 'keeptimer_resolve_entitlement') return json(subscriptionFault || await resolve(db, body.p_user_id));
       if (table === 'keeptimer_phase5_scope') return json(scopeFault || await scope(db, body.p_actor, body.p_write));
       if (table === 'keeptimer_sync_personal') return json((await db.query('SELECT keeptimer_sync_personal($1,$2,$3,$4,$5,$6) r',
@@ -70,7 +78,7 @@ test('Phase 5 real HTTP: private ownership, strict authority, Telegram and close
     const response = await call('active', '/account/experience?userId='+accounts.other.id+'&plan_code=team');
     assert.equal(response.status, 200); assert.equal(response.headers.get('cache-control'), 'no-store');
     const body = await response.json(); assert.equal(body.account.userId, accounts.active.id); assert.equal(body.account.workspaceId, accounts.active.workspace);
-    assert.equal(body.account.kind, 'individual'); assert.equal(body.shared, false); assert.equal(body.loginReady, false);
+    assert.equal(body.account.kind, 'individual'); assert.equal(body.shared, false); assert.equal(body.loginReady, true);
     assert.deepEqual(body.features, { tts: true, telegram: true, presets: true });
     assert.doesNotMatch(JSON.stringify(body), /password|pin_hash|refresh|createdBy|amountMinor|requiresSubscription/);
     const company = await (await call('company', '/account/experience')).json();

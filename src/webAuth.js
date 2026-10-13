@@ -1,6 +1,7 @@
 import cors from "cors";
 
 export const REFRESH_COOKIE_NAME = "__Secure-keeptimer-refresh";
+export const MFA_COOKIE_NAME = "__Secure-keeptimer-mfa";
 export const REFRESH_COOKIE_OPTIONS = Object.freeze({
   httpOnly: true,
   secure: true,
@@ -27,7 +28,7 @@ export function createWebAuthGuard(origins) {
     origin: (origin, callback) => callback(null, origins.has(origin)),
     credentials: true,
     methods: ["POST"],
-    allowedHeaders: ["Content-Type", "X-KeepTimer-CSRF"],
+    allowedHeaders: ["Content-Type", "X-KeepTimer-CSRF", "Authorization"],
   });
   return (req, res, next) => {
     req.webAuth = true;
@@ -68,25 +69,38 @@ export function createWebAuthGuard(origins) {
 
 // Reject duplicate cookies instead of selecting an ambiguous session.
 export function readRefreshCookie(req) {
+  return readCookie(req, REFRESH_COOKIE_NAME);
+}
+function readCookie(req, name) {
   const values = [];
   for (const part of (req.headers.cookie || "").split(";")) {
     const separator = part.indexOf("=");
-    if (separator < 0 || part.slice(0, separator).trim() !== REFRESH_COOKIE_NAME) continue;
+    if (separator < 0 || part.slice(0, separator).trim() !== name) continue;
     values.push(part.slice(separator + 1).trim());
   }
   if (values.length !== 1 || !values[0] || values[0].length > 4096) return null;
   try { return decodeURIComponent(values[0]); } catch { return null; }
 }
+export function readMfaCookie(req) {
+  const value=readCookie(req,MFA_COOKIE_NAME);
+  return typeof value==='string' && /^[A-Za-z0-9_-]{43}$/.test(value)?value:null;
+}
+export function setMfaCookie(res,value) {
+  res.cookie(MFA_COOKIE_NAME,value,{...REFRESH_COOKIE_OPTIONS,maxAge:600_000});
+}
+export function clearMfaCookie(res) { res.clearCookie(MFA_COOKIE_NAME,REFRESH_COOKIE_OPTIONS); }
 
 export function setRefreshCookie(res, token, expiresAt) {
   res.cookie(REFRESH_COOKIE_NAME, token, {
     ...REFRESH_COOKIE_OPTIONS,
     expires: new Date(expiresAt * 1000),
   });
+  clearMfaCookie(res);
 }
 
 export function clearRefreshCookie(res) {
   res.clearCookie(REFRESH_COOKIE_NAME, REFRESH_COOKIE_OPTIONS);
+  clearMfaCookie(res);
 }
 
 export function webAuthErrorHandler(error, req, res, next) {

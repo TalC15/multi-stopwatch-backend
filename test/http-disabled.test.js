@@ -33,7 +33,7 @@ test("login, refresh and protected API reject a deactivated worker", async () =>
     const table = url.pathname.split("/").at(-1);
     if (table === "keeptimer_resolve_entitlement") return legacySubscriptionResponse();
     if (table === "sessions" && (options?.method || request.method) === "POST") attemptedSessions++;
-    const result = table === "keeptimer_refresh_session" ? false : table === "sessions"
+    const result = table === "keeptimer_auth_limit" ? true : table === "keeptimer_refresh_session" ? false : table === "sessions"
       ? { id: ids.session, user_id: ids.worker,
           revoked_at: null, refresh_token_hash: hashToken(refreshToken) }
       : url.searchParams.has("role") ? { id: ids.superadmin } : worker;
