@@ -86,7 +86,7 @@ export function readMfaCookie(req) {
   return typeof value==='string' && /^[A-Za-z0-9_-]{43}$/.test(value)?value:null;
 }
 export function setMfaCookie(res,value) {
-  res.cookie(MFA_COOKIE_NAME,value,{...REFRESH_COOKIE_OPTIONS,maxAge:600_000});
+  res.cookie(MFA_COOKIE_NAME,value,{...REFRESH_COOKIE_OPTIONS,maxAge:30*86400_000});
 }
 export function clearMfaCookie(res) { res.clearCookie(MFA_COOKIE_NAME,REFRESH_COOKIE_OPTIONS); }
 

@@ -4,11 +4,13 @@
 
 ## SQL sırası
 
+16 Ekim teslim durumu: activation ve management production’da zaten uygulanmış kabul edilir; bu dosyalar değiştirilmez/yeniden çalıştırılmaz. Yeni `20261016_mfa_device_context.sql` kapılar false/false iken mevcut doğrulanmış owner ile, backend güncellemesinden önce hazırlanır. Cutover henüz uygulanmadı; bu görevde çalıştırılmaz. Aşağıdaki eski üç aşama tarihsel geçiş açıklamasıdır. Güncel ek sözleşme: [MFA_DEVICE_CONTEXT.md](MFA_DEVICE_CONTEXT.md).
+
 1. 20261009_password_mfa_activation.sql: HAZIRLIK. Yeni private tablolar/RPC ve users üzerinde toplam tek Superadmin indeksi ekler; eski fonksiyon, trigger, hesap verisi veya session değiştirmez. Birden fazla Superadmin kimliği varsa veri silmeden tüm hazırlık rollback olur. enabled=false, cutover=false.
 2. 20261009_password_mfa_management.sql: HAZIRLIK. Yeni MFA yönetim RPC/audit ekler; eski yönetici session'larını korur.
 3. 20261009_password_mfa_cutover.sql: yalnız onaylı bakım penceresinde. Aynı owner bağlantısında keeptimer.phase7_cutover ayarı confirmed-maintenance olmalıdır. 5 saniye lock timeout, transaction rollback. Eski privileged/password session'ları iptal eder, rollback'e karşı session/user trigger'larını ve sales wrapper'larını kurar. cutover=true olur; enabled ve sales false kalır.
 
-Alfabetik otomatik uygulama YANLIŞTIR: management hazırlığı cutover'dan önce gelir. Bu teslim ayrı bir güvenlik revizyonudur: temiz kaynak → orijinal Faz 7 patch’i → security-revision.patch. Önceki tam replacement patch’leriyle karıştırılmaz. Patch’lerin yerelde uygulanması SQL’in çalıştırılması anlamına gelmez; üç SQL dosyası ayrıca bu sırayla incelenir.
+Alfabetik otomatik uygulama YANLIŞTIR: management hazırlığı cutover'dan önce gelir. Bu teslim güncel ZIP kaynaklarının üzerine device-mfa patch’leridir. Güncel ZIP’ler önceki güvenlik revizyonlarını zaten içerir; eski patch zincirini yeniden uygulamayın. Patch’lerin yerelde uygulanması SQL’in çalıştırılması anlamına gelmez; üç SQL dosyası ayrıca bu sırayla incelenir.
 
 Owner preflight katalogdan current_user OID'sini, public keeptimer_* function/relation owner'larını ve temel tablo owner'larını karşılaştırır. Sabit postgres owner varsayılmaz. Eksik bağımlılık, farklı owner, service/browser owner veya güvensiz owner üyeliği transaction'ı durdurur. Owner uyuşmazlığı PUBLIC/EXECUTE grant açılarak çözülmez. Gerçek deployment kataloğu ayrıca doğrulanmalıdır.
 
@@ -20,14 +22,15 @@ SECURITY DEFINER search_path boştur; owner assertion SECURITY INVOKER'dır. Yen
 
 Access JWT 15 dakika, refresh JWT 30 gün; Individual DB session üst sınırı 30 gün, privileged DB/MFA üst sınırı 15 dakika; refresh bu süreyi uzatmaz. MFA yeni UUID yaratır. Ortak HTTP/Socket validator güncel user/session/version kontrol eder. Privileged timer/Telegram/Socket scope'u verilmez; şirket/Individual scope, entitlement ve outbox önceki kurallarla korunur.
 
-Web POST JSON, exact Origin, X-KeepTimer-CSRF:1, no-store, /api/auth path'li Secure/HttpOnly/SameSite=Lax refresh çerezi kullanır. MFA ilk faktöründe access/refresh/user/session verilmez; ayrı kısa ömürlü HttpOnly pre-auth nonce verilir. Challenge binding HMAC'i nonce ve mevcut refresh-cookie hash'ine bağlıdır. Login/logout nonce'u temizler. Farklı browser/session/context verify/resend yapamaz. Nonce oturum yetkisi değildir. Native ayrımı body transport metninden değil ayrı endpoint/guard'dan gelir.
+Web POST JSON, exact Origin, X-KeepTimer-CSRF:1 ve no-store korunur. /api/auth proxy üzerinden Secure/HttpOnly/SameSite=Lax çerezler kullanılır. MFA öncesinde access/refresh/user/session verilmez. İmzalı 30 günlük cihaz cookie’si ve parola doğrulanınca türetilen pre-auth cookie vardır; ikincisi mevcut refresh-cookie bağlamına bağlıdır. PIN login/logout pre-auth cookie’sini temizler; cihaz cookie’si ve DB kilidi korunur. Cookie bağlamı yetki değildir. Native ayrımı ayrı endpoint/guard’dan gelir; privileged MFA web ile sınırlıdır.
 
 | POST endpoint | Davranış |
 |---|---|
-| /auth/password-login | email,password; Individual session veya privileged MFA pending |
+| /auth/password-login | email,password,operationId (web UUID); Individual session veya privileged MFA pending |
 | /auth/native/passwordLogin | email,password; mevcut native guard; yalnız Individual |
-| /auth/mfa/verify | challengeId,context,code; bağlı nonce ve tek kullanım |
-| /auth/mfa/resend | challengeId,context; nonce/cooldown/send/attempt sınırı |
+| /auth/mfa/status | boş nesne; bağlam oluşturma veya sunucu durumuyla devam |
+| /auth/mfa/verify | challengeId,context,code,operationId; bağlı nonce ve tek kullanım |
+| /auth/mfa/resend | challengeId,context,operationId; nonce/cooldown/send/attempt sınırı |
 | /auth/activation/request, /auth/reset/request | email; aynı genel kabul zarfı, bounded private queue |
 | /auth/activation/complete, /auth/reset/complete | challengeId,context,password; session yaratmaz |
 | /auth/password/change | Bearer, email,currentPassword,password; eski session/challenge iptal |
@@ -45,7 +48,7 @@ Worker 5 saniyede ve kabul cevabı bitince tetiklenir; instance başına tek dra
 
 auth_maintain iç RPC'si her tablo için indeksli en çok 64 satır temizler: limits başlangıcı 24 saatten eski, challenges expiry üzerinden 7 gün geçmiş, queue süresi/lease'i bitmiş. Kullanılmış/başarısız challenge da 7 gün saklanır. SKIP LOCKED aktif transaction'ı beklemez. Temizlik ayrı transaction'da worker döngüsündedir; dış cron veya public HTTP cleanup yok. Worker durursa retention gecikir; 15 dakikalık bütçeler bypass olmaz.
 
-Account/IP limitleri 15 dakikada login 10/50, send 5/25, verify 30/150; PIN ayrıca eski yerel limitlerle DB 10/50 kullanır. IP önce kilitlenir, reddedilen IP yeni email key'i yaratamaz. MFA hesap başına 15 dakikada 5 challenge; OTP 10 dakika/5 yanlış deneme/ilk dahil 3 gönderim/60 saniye resend. Resend TTL/attempts sıfırlamaz. Dağıtık çok-IP yükte limits için mutlak toplam tablo boyutu garantisi yok; satır sayısı/cleanup throughput izlenmelidir. Yerel latency örnekleri sabit-zaman veya internet yan-kanal yokluğu kanıtı değildir.
+Account/IP limitleri 15 dakikada login 10/50, send 5/25, verify 30/150; PIN ayrıca eski yerel limitlerle DB 10/50 kullanır. IP önce kilitlenir, reddedilen IP yeni email key'i yaratamaz. Eski MFA RPC yolu kapalıdır. Yeni MFA ilk kod 120 saniye, bağlam başına 6 yanlış deneme/10 dakika kilit, 15 dakikada ilk dahil 3 gönderim, en az 60 saniye resend uygular. Geçerli resend kalan süreye yalnız 30 saniye ekler; attempts sıfırlamaz. MFA limit anahtarındaki account boyutu artık doğrulanmış cihaz/hesap bağlamıdır; hesap geneli sert MFA gönderim kotası yoktur. Parola login 10/50 ve link send 5/25 değişmez. Dağıtık çok-IP yükte limits için mutlak toplam tablo boyutu garantisi yok; satır sayısı/cleanup throughput izlenmelidir. Yerel latency örnekleri sabit-zaman veya internet yan-kanal yokluğu kanıtı değildir.
 
 ## Yönetim
 
@@ -67,7 +70,7 @@ DB login adı tek başına insan kimliği kanıtı değildir. Bireysel authentic
 
 Hazırlık eski backend'le çalışabilir. Yeni backend eski SQL'de yeni RPC/limiter yokluğu nedeniyle auth/PIN'i kapatabilir; uyumlu production kombinasyonu değildir. Yeni backend cutover öncesi eski privileged session'ları kabul etmez: backend geçişi bakım penceresindedir. Yeni frontend eski backend'de yeni auth başarısız olur. Kesintisiz geçiş garantisi yoktur.
 
-Gelecekte onaylı sıra: owner/ACL/yedek kontrolü → iki hazırlık SQL'i → staging mail/DNS/native/PG testleri → bakım ve eski instance trafiğini kesme → yeni backend/frontend → açıkça onaylı cutover → owner enrollment → ayrı auth release kararı/smoke. Sales ayrıca kapalı kalır. Bu teslim release açmaz.
+Gelecekte onaylı sıra: owner/ACL/yedek kontrolü → uygulanmış iki hazırlığı doğrulama → yeni cihaz MFA hazırlık SQL’i → staging mail/DNS/native/PG testleri → bakım ve eski instance trafiğini kesme → yeni backend/frontend → açıkça onaylı cutover → owner enrollment → ayrı auth release kararı/smoke. Sales ayrıca kapalı kalır. Bu teslim release açmaz.
 
 Cutover sonrası Render rollback'ten ÖNCE trafik kesilerek owner transaction'ında auth=false ve sales=false doğrulanır. Auth true→false trigger'ı password/privileged session/challenge/queue/proof iptal eder. Sonra eski binary'ye dönülebilir; DB trigger eski privileged/password session INSERT'ini engeller, eski yönetici kullanılabilirliği geri gelmez. SQL drop/revert, PIN'e dönüş veya eski session restore rollback yöntemi değildir; yeni backend ileri düzeltilmelidir. Vercel-only rollback bypass açmaz, fakat auth/management UX'i kaybettirebilir.
 

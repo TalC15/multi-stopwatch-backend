@@ -5,12 +5,12 @@ export function createAuthEmail(env = process.env, fetchImpl = globalThis.fetch)
       return env.AUTH_EMAIL_PROVIDER === 'resend' && typeof env.RESEND_API_KEY === 'string' &&
         env.RESEND_API_KEY.length > 15 && /^[^\r\n<>\s]+@[^\r\n<>\s]+\.[^\r\n<>\s]+$/.test(env.AUTH_EMAIL_FROM || '');
     },
-    async send({ to, purpose, code, url, challengeId, generation }) {
+    async send({ to, purpose, code, url, challengeId, generation, expiresAt }) {
       if (!this.configured()) throw new Error('AUTH_NOT_READY');
       const title = purpose === 'mfa' ? 'KeepTimer giriş doğrulama kodu' :
         purpose === 'activation' ? 'KeepTimer hesabınızı güvenle hazırlayın' : 'KeepTimer parola sıfırlama';
       const body = purpose === 'mfa'
-        ? `Giriş doğrulama kodunuz: ${code}\nKod 10 dakika içinde geçersiz olur. Kodu kimseyle paylaşmayın.`
+        ? `Giriş doğrulama kodunuz: ${code}\nKodun son kullanma zamanı: ${expiresAt || 'sunucuda belirtilen süre'} (UTC). Süre dolduktan sonra kod kullanılamaz. Kodu kimseyle paylaşmayın.`
         : `${purpose === 'activation' ? 'İlk parolanızı belirlemek' : 'Parolanızı sıfırlamak'} için bağlantıyı açın:\n${url}\nBağlantı 30 dakika geçerlidir ve yalnız bir kez kullanılabilir.`;
       try {
         const response = await fetchImpl('https://api.resend.com/emails', {
@@ -20,11 +20,16 @@ export function createAuthEmail(env = process.env, fetchImpl = globalThis.fetch)
           body: JSON.stringify({ from: env.AUTH_EMAIL_FROM, to: [to], subject: title,
             text: `${body}\n\nBu işlemi siz başlatmadıysanız bu mesajı dikkate almayın.\nKeepTimer` }),
         });
-        const data = response.ok ? await response.json() : null;
+        if(!response.ok){
+          const error=new Error('AUTH_EMAIL_UNAVAILABLE');
+          error.delivery=response.status>=400 && response.status<500 && ![408,409,429].includes(response.status)?'rejected':'unknown';
+          throw error;
+        }
+        const data = await response.json();
         if (!response.ok || typeof data?.id !== 'string' || !data.id) throw new Error();
         // Provider acceptance is NOT inbox delivery. Never return provider payload.
         return { accepted: true };
-      } catch { throw new Error('AUTH_EMAIL_UNAVAILABLE'); }
+      } catch (cause) { throw Object.assign(new Error('AUTH_EMAIL_UNAVAILABLE'),{delivery:cause?.delivery==='rejected'?'rejected':'unknown'}); }
     },
   };
 }

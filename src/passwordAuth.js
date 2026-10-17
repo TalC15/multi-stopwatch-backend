@@ -1,12 +1,15 @@
 import crypto from 'node:crypto';
 import bcrypt from 'bcrypt';
 import { createAuthEmail } from './authEmail.js';
-import { setRefreshCookie, readRefreshCookie, readMfaCookie, setMfaCookie, clearMfaCookie } from './webAuth.js';
+import { setRefreshCookie } from './webAuth.js';
+import {createMfaDeviceAuth,mfaMessages} from './mfaDeviceAuth.js';
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const secret = /^[A-Za-z0-9_-]{43}$/;
 const errors = { AUTH_INPUT_INVALID: 400, AUTH_INVALID: 401, AUTH_FORBIDDEN: 403,
-  AUTH_RATE_LIMITED: 429, AUTH_NOT_READY: 503, AUTH_UNAVAILABLE: 503, AUTH_EMAIL_UNAVAILABLE: 503 };
+  AUTH_RATE_LIMITED: 429, AUTH_NOT_READY: 503, AUTH_UNAVAILABLE: 503, AUTH_EMAIL_UNAVAILABLE: 503, MFA_INVALID_CODE:401, MFA_CODE_EXPIRED:410, MFA_ATTEMPTS_EXHAUSTED:429,
+  MFA_DEVICE_LOCKED:429, MFA_RESEND_COOLDOWN:429, MFA_SEND_LIMIT_REACHED:429, MFA_CHALLENGE_INVALID:409,
+  MFA_CONTEXT_REQUIRED:409, EMAIL_DELIVERY_UNAVAILABLE:503, NETWORK_OR_SERVER_ERROR:503 };
 const fail = code => Object.assign(new Error(code), { code });
 export const normalizeAuthEmail = value => {
   // ASCII canonicalization only; no provider-specific dot/plus rewriting.
@@ -86,50 +89,29 @@ export function createPasswordAuth({ db, tokens, mail = createAuthEmail(), env =
     const confirmed=await command('delivery',{challenge_id:id,proof_digest:proofDigest,accepted});
     if(!accepted || confirmed?.ok!==true) throw fail('AUTH_EMAIL_UNAVAILABLE');
   }
-  async function issue(candidate,purpose,transport,origin,browserContext='') {
+  async function issue(candidate,purpose,transport,origin) {
+    if(!['activation','reset'].includes(purpose))throw fail('AUTH_INPUT_INVALID');
     const id=crypto.randomUUID(),ctx=crypto.randomBytes(32).toString('base64url');
-    const proof=purpose==='mfa'?String(crypto.randomInt(0,100_000_000)).padStart(8,'0'):ctx;
+    const proof=ctx;
     const hashes=digest(purpose,id,ctx,proof);
-    const row=await command('issue',{user_id:candidate.id,purpose,transport,challenge_id:id,...hashes,
-      ...(purpose==='mfa'?{expected_hash:candidate.hash,binding_digest:hmac('AUTH_TOKEN_HMAC_KEY',['browser',browserContext])}:{})});
+    const row=await command('issue',{user_id:candidate.id,purpose,transport,challenge_id:id,...hashes});
     if(row?.ok!==true) throw fail(row?.code==='AUTH_RATE_LIMITED'?'AUTH_RATE_LIMITED':'AUTH_INVALID');
     await deliver(row,purpose,id,ctx,proof,hashes.proof_digest,origin);
-    return {mfaRequired:true,challengeId:id,context:ctx,retryAfter:60,expiresIn:600};
+    return {accepted:true};
   }
   async function passwordLogin(body,ip,transport,browserContext='') {
-    exact(body,['email','password']); const email=normalizeAuthEmail(body.email); validateAuthPassword(body.password);
+    exact(body,Object.hasOwn(body || {},'operationId')?['email','password','operationId']:['email','password']); const email=normalizeAuthEmail(body.email); validateAuthPassword(body.password);
     cryptoConfigured(); await limit('login',email,ip);
     const candidate=await command('lookup',{email});
     const matches=await bcrypt.compare(body.password,candidate?.hash || await dummyHash);
     if(!matches || candidate?.ready!==true || transport==='native' && candidate.role!=='worker') throw fail('AUTH_INVALID');
     if(['superadmin','agent'].includes(candidate.role)) {
-      const origin=mailConfigured();
-      await limit('send',email,ip); return issue(candidate,'mfa',transport,origin,browserContext);
+      mailConfigured();
+      if(!browserContext?.req || !browserContext?.res)throw fail('MFA_CONTEXT_REQUIRED');
+      return mfa.start(candidate,body,browserContext.req,browserContext.res);
     }
     const issued=session(candidate.id);
     return resultSession(await command('login',{user_id:candidate.id,expected_hash:candidate.hash,transport,session_id:issued.sessionId,refresh_hash:issued.refresh_hash}),issued);
-  }
-  async function verifyMfa(body,ip,browserContext='') {
-    exact(body,['challengeId','context','code']);
-    if(typeof body.code!=='string' || !/^\d{8}$/.test(body.code)) throw fail('AUTH_INPUT_INVALID');
-    mailConfigured(); const data={...context(body,'mfa'),transport:'web',binding_digest:hmac('AUTH_TOKEN_HMAC_KEY',['browser',browserContext])};
-    await limit('verify',body.challengeId,ip);
-    const inspected=await command('inspect',data);
-    if(inspected?.ok!==true || !uuid.test(inspected.id || '')) throw fail('AUTH_INVALID');
-    const issued=session(inspected.id);
-    return resultSession(await command('consume',{...data,session_id:issued.sessionId,refresh_hash:issued.refresh_hash}),issued);
-  }
-  async function resendMfa(body,ip,browserContext='') {
-    exact(body,['challengeId','context']); const origin=mailConfigured();
-    const data={...context(body,'mfa'),transport:'web',binding_digest:hmac('AUTH_TOKEN_HMAC_KEY',['browser',browserContext])};
-    await limit('send',body.challengeId,ip);
-    const proof=String(crypto.randomInt(0,100_000_000)).padStart(8,'0');
-    const hashes=digest('mfa',data.challenge_id,body.context,proof);
-    const row=await command('resend',{...data,proof_digest:hashes.proof_digest});
-    if(row?.ok!==true) throw fail(row?.code==='AUTH_RATE_LIMITED'?'AUTH_RATE_LIMITED':'AUTH_INVALID');
-    // Unique generation keyed to the replacement proof, no raw OTP in headers.
-    await deliver(row,'mfa',data.challenge_id,body.context,proof,hashes.proof_digest,origin,hashes.proof_digest);
-    return {accepted:true,retryAfter:60};
   }
   async function requestLink(body,ip,purpose) {
     exact(body,['email']); const email=normalizeAuthEmail(body.email);mailConfigured();
@@ -146,6 +128,8 @@ export function createPasswordAuth({ db, tokens, mail = createAuthEmail(), env =
     drainPromise=(async()=>{
     try {
       await rpc('keeptimer_auth_maintain',{});
+      // MFA retention is independent of activation/reset delivery availability.
+      try { await rpc('keeptimer_mfa_maintain',{}); } catch { /* Retry next bounded worker tick. */ }
       const origin=mailConfigured();
       for(let count=0;count<5;count++) {
         const job=await rpc('keeptimer_auth_link_queue_rpc',{p_action:'claim',p_data:{}});
@@ -187,22 +171,15 @@ export function createPasswordAuth({ db, tokens, mail = createAuthEmail(), env =
     if(result?.ok!==true || !revoke && !Array.isArray(result.sessions)) throw fail('AUTH_INVALID');
     return revoke?{success:true,requiresLogin:true}:{sessions:result.sessions};
   }
-  return {passwordLogin,verifyMfa,resendMfa,requestLink,consumeLink,changePassword,sessions,drainLinks};
+  const mfa=createMfaDeviceAuth({rpc,hmac,mail,session,resultSession,limit});
+  return {passwordLogin,mfa,requestLink,consumeLink,changePassword,sessions,drainLinks};
 }
 export function mountPasswordAuth({app,db,tokens,authenticate,mail,env=process.env}) {
   const core=createPasswordAuth({db,tokens,mail,env});
   const worker=setInterval(()=>void core.drainLinks(),5000);worker.unref();
-  // Not an auth session: a short-lived HttpOnly pre-auth browser nonce, additionally
-  // bound to the current refresh cookie. Account switch/PIN login/logout clears it.
-  const browserContext=(req,nonce=readMfaCookie(req))=>{
-    if(!nonce)throw fail('AUTH_INVALID');
-    return nonce+':'+(readRefreshCookie(req)?tokens.hashToken(readRefreshCookie(req)):'anonymous');
-  };
   const route=(path,fn,session=false)=>app.post(path,...(session?[authenticate]:[]),async(req,res)=>{
     try {
-      if(req.path==='/auth/password-login')clearMfaCookie(res);
       const data=await fn(req);
-      if(data.mfaRequired && req.mfaNonce)setMfaCookie(res,req.mfaNonce);
       if(data.accessToken) {
         const {refreshToken,...publicData}=data;
         if(!req.nativeAuth) setRefreshCookie(res,refreshToken,tokens.verifyToken(refreshToken).exp);
@@ -214,16 +191,24 @@ export function mountPasswordAuth({app,db,tokens,authenticate,mail,env=process.e
     } catch(error) {
       const code=Object.hasOwn(errors,error?.code || '')?error.code:'AUTH_UNAVAILABLE';
       if(code==='AUTH_RATE_LIMITED') res.set('Retry-After','900');
-      return res.status(errors[code]).json({code,error:code==='AUTH_RATE_LIMITED'?'Çok fazla deneme. Daha sonra tekrar deneyin.':
-        code==='AUTH_INVALID'?'Bilgiler doğrulanamadı.':'İşlem şu anda tamamlanamadı.'});
+      if(error.state){
+        const at=code==='MFA_DEVICE_LOCKED' || code==='MFA_ATTEMPTS_EXHAUSTED'?Date.parse(error.state.lockedUntil):
+          code==='MFA_SEND_LIMIT_REACHED'?Date.parse(error.state.sendLimitAvailableAt):
+            Math.max(Date.parse(error.state.riskUntil)||0,Date.parse(error.state.resendAvailableAt)||0);
+        const remaining=Math.max(0,Math.ceil((at-Date.parse(error.state.serverNow))/1000));
+        if(Number.isFinite(remaining) && remaining>0)res.set('Retry-After',String(remaining));
+      }
+      return res.status(errors[code]).json({code,...(error.state?{state:error.state}:{}),error:mfaMessages[code] || (code==='AUTH_RATE_LIMITED'?'Çok fazla deneme. Daha sonra tekrar deneyin.':
+        code==='AUTH_INVALID'?'Bilgiler doğrulanamadı.':'İşlem şu anda tamamlanamadı.')});
     }
   });
-  route(['/auth/password-login','/auth/native/passwordLogin'],req=>{
-    req.mfaNonce=crypto.randomBytes(32).toString('base64url');
-    return core.passwordLogin(req.body,req.ip,req.nativeAuth?'native':'web',browserContext(req,req.mfaNonce));
+  route(['/auth/password-login','/auth/native/passwordLogin'],req=>
+    core.passwordLogin(req.body,req.ip,req.nativeAuth?'native':'web',{req,res:req.res}));
+  route('/auth/mfa/status',req=>{
+    exact(req.body,[]);return core.mfa.status(req,req.res);
   });
-  route('/auth/mfa/verify',req=>core.verifyMfa(req.body,req.ip,browserContext(req)));
-  route('/auth/mfa/resend',req=>core.resendMfa(req.body,req.ip,browserContext(req)));
+  route('/auth/mfa/verify',req=>core.mfa.verify(req,req.res));
+  route('/auth/mfa/resend',req=>core.mfa.resend(req,req.res));
   for(const [path,purpose] of [['activation','activation'],['reset','reset']]) {
     route(`/auth/${path}/request`,async req=>{
       const accepted=await core.requestLink(req.body,req.ip,purpose);
