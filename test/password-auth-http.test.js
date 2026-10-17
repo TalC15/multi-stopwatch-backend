@@ -3,13 +3,17 @@ import assert from 'node:assert/strict';
 import {once} from 'node:events';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcrypt';
-import {createHash} from 'node:crypto';
+import {createHash,randomUUID} from 'node:crypto';
 import express from 'express';
 import {mountPasswordAuth,createPasswordAuth,validateAuthPassword,normalizeAuthEmail} from '../src/passwordAuth.js';
 import {createAuthEmail} from '../src/authEmail.js';
 import {createWebAuthGuard,webAuthErrorHandler} from '../src/webAuth.js';
 import {nativeAuthGuard} from '../src/nativeAuth.js';
-import {database,customer,privileged,enable,ready,rpcAdapter,fixturePassword,fixtureHash} from './support/passwordAuth.js';
+import {customer,privileged,enable,ready,fixturePassword,fixtureHash} from './support/passwordAuth.js';
+import {database as deviceDatabase,rpcAdapter} from './support/mfaDevice.js';
+// The latest HTTP contract uses the additive MFA schema. No cutover SQL is
+// executed: deviceDatabase provisions only isolated test gate state.
+async function database(t){const db=await deviceDatabase(t);await db.exec('UPDATE keeptimer_auth_release SET enabled=false');return db;}
 const origin='https://fixture.example';
 const env={AUTH_TOKEN_HMAC_KEY:'a'.repeat(64),AUTH_RATE_HMAC_KEY:'b'.repeat(64),AUTH_PUBLIC_ORIGIN:origin,AUTH_ALLOWED_ORIGINS:origin};
 const tokens={generateAccessToken:(u,s)=>jwt.sign({id:u.id,sessionId:s,type:'access'},'test-password-http-secret',{expiresIn:'15m'}),
@@ -34,20 +38,21 @@ test('password HTTP: fail-closed rollout, pending login, generic errors, real se
  assert.equal(login.status,200);assert.equal(body.user.id,c.id);assert.ok(body.accessToken);assert.equal(body.refreshToken,undefined);
  assert.match(login.headers.get('set-cookie'),/HttpOnly/);assert.match(login.headers.get('set-cookie'),/Secure/);assert.match(login.headers.get('set-cookie'),/SameSite=Lax/);
  assert.equal((await post('password-login',{email:'admin@example.test',password:fixturePassword+'wrong'})).status,401);
- const first=await post('password-login',{email:'admin@example.test',password:fixturePassword});const challenge=await first.json();
+ const bootstrap=await post('mfa/status',{}),device=bootstrap.headers.getSetCookie()[0].split(';')[0];
+ const first=await post('password-login',{email:'admin@example.test',password:fixturePassword,operationId:randomUUID()},{Cookie:device});const challenge=await first.json();
  assert.equal(first.status,200);assert.equal(challenge.mfaRequired,true);
- const cookie=first.headers.getSetCookie().at(-1).split(';')[0];
- assert.match(cookie,/^__Secure-keeptimer-mfa=/);assert.doesNotMatch(first.headers.get('set-cookie'),/keeptimer-refresh/);
+ const preauth=first.headers.getSetCookie().at(-1).split(';')[0],cookie=device+'; '+preauth;
+ assert.match(preauth,/^__Secure-keeptimer-mfa=/);assert.doesNotMatch(first.headers.get('set-cookie'),/keeptimer-refresh/);
  for(const field of ['accessToken','refreshToken','sessionId','user'])assert.equal(challenge[field],undefined);
  assert.equal(sent.length,1);assert.match(sent[0].code,/^\d{8}$/);
- const verify={challengeId:challenge.challengeId,context:challenge.context,code:sent[0].code};
+ const verify={challengeId:challenge.challengeId,context:challenge.context,code:sent[0].code,operationId:randomUUID()};
  assert.equal((await post('mfa/verify',{...verify,mfaPassed:true},{Cookie:cookie})).status,400);
- assert.equal((await post('mfa/verify',verify)).status,401);
- assert.equal((await post('mfa/verify',verify,{Cookie:cookie+'; __Secure-keeptimer-refresh=new-account-session'})).status,401);
+ assert.equal((await post('mfa/verify',verify)).status,409);
+ assert.equal((await post('mfa/verify',verify,{Cookie:cookie+'; __Secure-keeptimer-refresh=new-account-session'})).status,409);
  const complete=await post('mfa/verify',verify,{Cookie:cookie});assert.equal(complete.status,200);const privilegedBody=await complete.json();assert.equal(privilegedBody.user.id,p.id);
- assert.notEqual(privilegedBody.sessionId,body.sessionId);assert.equal((await post('mfa/verify',verify,{Cookie:cookie})).status,401);
+ assert.notEqual(privilegedBody.sessionId,body.sessionId);assert.equal((await post('mfa/verify',verify,{Cookie:cookie})).status,409);
  for(const response of [login,first,complete,bad1])for(const header of ['Cache-Control','CDN-Cache-Control','Vercel-CDN-Cache-Control'])assert.equal(response.headers.get(header),'no-store');
- const cache=(await db.query('SELECT context_digest,proof_digest FROM keeptimer_auth_challenges')).rows[0];
+ const cache=(await db.query('SELECT context_id,proof_digest FROM keeptimer_mfa_challenges')).rows[0];
  assert.ok(!JSON.stringify(cache).includes(sent[0].code));assert.ok(!JSON.stringify(cache).includes(challenge.context));
  const resetReady=await post('reset/request',{email:'admin@example.test'});assert.equal(resetReady.status,200);
  assert.equal((await post('reset/request',{email:'absent@example.test'})).status,200);

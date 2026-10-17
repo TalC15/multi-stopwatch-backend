@@ -21,7 +21,7 @@ test('pending account cannot login; activation atomically keeps same user/worksp
  assert.equal((await command(db,'consume',consume)).loginReady,true);
  assert.equal((await command(db,'consume',consume)).ok,false);
  assert.equal((await db.query('SELECT workspace_id FROM users WHERE id=$1',[c.id])).rows[0].workspace_id,c.workspace);
- assert.equal((await db.query('SELECT count(*) AS n FROM sessions WHERE user_id=$1',[c.id])).rows[0].n,0);
+ assert.equal((await db.query('SELECT count(*)::int AS n FROM sessions WHERE user_id=$1',[c.id])).rows[0].n,0);
  assert.equal((await command(db,'lookup',{email:'owner@example.test'})).ready,true);
 });
 test('activation expiry and context/purpose binding; target id cannot redirect activation',async t=>{
@@ -37,7 +37,7 @@ test('MFA verified first factor, fresh session/proof, one use and absolute expir
  assert.equal((await command(db,'issue',{user_id:p.id,purpose:'mfa',expected_hash:fixtureHash})).ok,false);
  await ready(db,p.id);
  const d=await issued(db,p.id,'mfa'),v=consumeData(d);
- assert.equal((await db.query('SELECT count(*) AS n FROM sessions')).rows[0].n,0);
+ assert.equal((await db.query('SELECT count(*)::integer AS n FROM sessions')).rows[0].n,0);
  assert.equal((await command(db,'consume',{...v,proof_digest:'e'.repeat(64)})).ok,false);
  assert.equal((await command(db,'consume',v)).user.id,p.id);
  assert.equal((await command(db,'consume',v)).ok,false);
