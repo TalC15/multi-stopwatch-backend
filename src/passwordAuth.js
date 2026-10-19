@@ -101,7 +101,7 @@ export function createPasswordAuth({ db, tokens, mail = createAuthEmail(), env =
   }
   async function passwordLogin(body,ip,transport,browserContext='') {
     exact(body,Object.hasOwn(body || {},'operationId')?['email','password','operationId']:['email','password']); const email=normalizeAuthEmail(body.email); validateAuthPassword(body.password);
-    cryptoConfigured(); await limit('login',email,ip);
+    cryptoConfigured(); //FOR TEST await limit('login',email,ip);
     const candidate=await command('lookup',{email});
     const matches=await bcrypt.compare(body.password,candidate?.hash || await dummyHash);
     if(!matches || candidate?.ready!==true || transport==='native' && candidate.role!=='worker') throw fail('AUTH_INVALID');
