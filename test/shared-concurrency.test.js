@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import pg from 'pg';
+import { connect } from './support/subscriptionDatabase.js';
 import { readFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { ids, schema } from './support/database.js';
@@ -17,14 +17,10 @@ async function setup(t) {
   assert.match(name,/^[a-zA-Z0-9_]+_keeptimer_test$/);
   assert.equal(approved,name,'Approval must name the exact disposable DB');
   const clients=[];
-  t.after(async()=>{await Promise.all(clients.map(c=>c.end()));});
-  for(let i=0;i<3;i++){const client=new pg.Client({connectionString:url});await client.connect();clients.push(client);}
+  for(let i=0;i<3;i++) clients.push(await connect(t,url));
   const [admin,a,b]=clients;
-  // This is the only schema reset in this new suite, after both safety checks.
+  // Reset only after approval AND all three guarded connection preflights.
   await admin.query('DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public');
-  for(const role of ['anon','authenticated','service_role']) {
-    if(!(await admin.query('SELECT 1 FROM pg_roles WHERE rolname=$1',[role])).rowCount) await admin.query(`CREATE ROLE ${role}`);
-  }
   await admin.query(schema.replace(/CREATE ROLE (anon|authenticated|service_role);/g,''));
   // Match the relevant live metadata additions absent from the historical fixture.
   await admin.query("ALTER TABLE timers ADD COLUMN created_at timestamptz DEFAULT now(), ALTER COLUMN name SET NOT NULL, ALTER COLUMN type SET NOT NULL");

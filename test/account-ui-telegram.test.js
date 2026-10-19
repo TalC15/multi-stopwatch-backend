@@ -24,6 +24,7 @@ test("active management lists exclude closed users; Telegram IDs stay scoped to 
     [ids.outsider, { id: ids.outsider, username: "other-company", role: "worker", workspace_id: ids.otherCompany, disabled_at: null, telegram_chat_id: "foreign-chat" }],
     [ids.superadmin, { id: ids.superadmin, username: "superadmin", role: "superadmin", workspace_id: null, disabled_at: null }],
   ]);
+  let allowPasswordSession = false;
   const actualTelegramReads = [];
   const actualTelegramWrites = [];
   const originalFetch = globalThis.fetch;
@@ -36,7 +37,7 @@ test("active management lists exclude closed users; Telegram IDs stay scoped to 
     }
     const table = url.pathname.split("/").at(-1);
     if (table === "keeptimer_resolve_entitlement") return legacySubscriptionResponse();
-    if(table==="keeptimer_auth_session")return new Response("false",{headers:{"Content-Type":"application/json"}});
+    if(table==="keeptimer_auth_session")return new Response(JSON.stringify(allowPasswordSession),{headers:{"Content-Type":"application/json"}});
     const method = options?.method || request.method || "GET";
     const rowId = eq(url, "id");
     let data;
@@ -88,6 +89,17 @@ test("active management lists exclude closed users; Telegram IDs stay scoped to 
       return { status: response.status, body: await response.json() };
     };
 
+    allowPasswordSession = true;
+    for(const [role,credential_kind,supported] of [['manager','pin',false],['worker','pin',false],['worker','password',true],['agent','password',true],['superadmin','password',true]]) {
+      const original={...users.get(ids.worker)};
+      Object.assign(users.get(ids.worker),{role,credential_kind});
+      const capability=await request('GET','/account/security',ids.worker);
+      assert.equal(capability.status,200);
+      assert.deepEqual(capability.body,{userId:ids.worker,passwordSecurity:supported});
+      users.set(ids.worker,original);
+    }
+    assert.equal((await request('GET','/account/security',closedId)).status,401);
+    allowPasswordSession = false;
     const workers = await request("GET", "/users", ids.manager);
     assert.equal(workers.status, 200);
     assert.deepEqual(workers.body.users.map(u => u.id).sort(), [ids.manager, ids.worker].sort());

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import pg from "pg";
+import { connect } from "./support/subscriptionDatabase.js";
 import { readFile } from "node:fs/promises";
 import { ids, schema } from "./support/database.js";
 
@@ -11,24 +11,12 @@ const url = process.env.TEST_DATABASE_URL;
 const enabled = Boolean(url);
 
 async function setup(t) {
-  const parsed = new URL(url);
-  if (!(["localhost", "127.0.0.1", "::1"].includes(parsed.hostname) &&
-        parsed.pathname.endsWith("_keeptimer_test"))) {
-    throw new Error("TEST_DATABASE_URL must point to a disposable LOCAL *_keeptimer_test database");
-  }
-  const connections = await Promise.all([0, 1, 2].map(async () => {
-    const client = new pg.Client({ connectionString: url });
-    await client.connect();
-    return client;
-  }));
-  t.after(async () => { await Promise.all(connections.map(c => c.end())); });
+  // Reuse the strict URL, cluster identity, inventory and role preflight.
+  const connections = [];
+  for (let i = 0; i < 3; i++) connections.push(await connect(t, url));
   const [admin, writer, closer] = connections;
 
   await admin.query("DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public");
-  for (const name of ["anon", "authenticated", "service_role"]) {
-    const { rowCount } = await admin.query("SELECT 1 FROM pg_roles WHERE rolname=$1", [name]);
-    if (!rowCount) await admin.query(`CREATE ROLE ${name}`);
-  }
   await admin.query(schema.replace(/CREATE ROLE (anon|authenticated|service_role);/g, ""));
   await admin.query(await readFile(new URL("../db/migrations/20260925_company_account_deactivation.sql", import.meta.url), "utf8"));
   await admin.query(await readFile(new URL("../db/migrations/20260925_personal_sync_api.sql", import.meta.url), "utf8"));

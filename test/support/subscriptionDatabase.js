@@ -69,8 +69,8 @@ async function verifyServer(db, config, clusterName) {
   }
 }
 
-export async function connect(t) {
-  const config = localTestUrl();
+export async function connect(t, value = process.env.SUBSCRIPTION_TEST_DATABASE_URL) {
+  const config = localTestUrl(value);
   if (!config) throw new Error('SUBSCRIPTION_TEST_DATABASE_URL is required for PostgreSQL connections');
   const clusterName = process.env.SUBSCRIPTION_TEST_CLUSTER_NAME;
   if (!/^keeptimer_disposable_[0-9a-f]{32}$/.test(clusterName || '')) {
