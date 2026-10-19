@@ -11,11 +11,11 @@ export async function sendTelegramMessage(chatId, text) {
     const data = await response.json();
 
     if (!data.ok) {
-      console.error("[Telegram] Mesaj gönderilemedi:", data);
+      console.error("[Telegram] Mesaj gönderilemedi");
     } else {
-      console.log("[Telegram] Mesaj gönderildi:", chatId);
+      console.log("[Telegram] Mesaj gönderildi");
     }
-  } catch (err) {
-    console.error("[Telegram] Hata:", err);
+  } catch {
+    console.error("[Telegram] Gönderim sonucu doğrulanamadı");
   }
 }

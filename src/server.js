@@ -59,6 +59,10 @@ app.set("trust proxy", 1);
 app.use(express.json());
 app.get('/account/subscription', authenticateIdentity, subscriptionCore.getSubscription);
 app.get('/account/experience', authenticateIdentity, accountExperience.getExperience);
+app.get('/account/security', authenticateIdentity, (req,res)=>{
+  res.set('Cache-Control','no-store');
+  res.json({userId:req.user.id,passwordSecurity:req.user.credential_kind==='password' && ['worker','agent','superadmin'].includes(req.user.role)});
+});
 mountSubscriptionSales({ app, authenticate: authenticateIdentity, db: supabase,
   origins: parseAuthOrigins(process.env.AUTH_ALLOWED_ORIGINS) });
 
