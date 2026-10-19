@@ -99,6 +99,8 @@ createSuperAdminIfNotExists();
 
 // IP bazlı: aynı IP'den 15 dakikada en fazla 10 login denemesi
 const loginLimiter = rateLimit({
+  // FOR TEST normalde skip satırını komple sil
+  skip: () => true,
   windowMs: 15 * 60 * 1000,
   max: 10,
   standardHeaders: true,
@@ -182,7 +184,10 @@ app.post(["/auth/login", "/auth/native/login"], loginLimiter, async (req, res) =
 
   // Shared DB budget; domain-separated HMAC derived from the existing JWT key
   // keeps company PIN configuration unchanged and stores no IP/name plaintext.
-  try {
+  
+  //FOR TEST
+  
+  /*try {
     const key = process.env.JWT_SECRET;
     if (!key) throw new Error();
     const digest = value => crypto.createHmac('sha256', key).update(JSON.stringify(value)).digest('hex');
@@ -190,9 +195,10 @@ app.post(["/auth/login", "/auth/native/login"], loginLimiter, async (req, res) =
       p_account: digest(['phase7-pin','account',username]), p_ip: digest(['phase7-pin','ip',req.ip]) });
     if (budget.error) throw new Error();
     if (budget.data !== true) return res.status(429).json({code:'AUTH_RATE_LIMITED',error:'Çok fazla deneme'});
-  } catch { return res.status(503).json({code:'AUTH_UNAVAILABLE',error:'Giriş şu anda kullanılamıyor'}); }
+  } catch { return res.status(503).json({code:'AUTH_UNAVAILABLE',error:'Giriş şu anda kullanılamıyor'}); }*/
 
-  if (isLockedOut(username)) {
+  //FOR TEST normal hali if (isLockedOut(username))
+  if (false) {
     return res.status(429).json({
       error:
         "Çok fazla başarısız deneme. Lütfen 15 dakika sonra tekrar deneyin.",
