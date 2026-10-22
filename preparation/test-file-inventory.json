@@ -36,7 +36,7 @@
     },
     {
       "file": "test/mfa-device-http.test.js",
-      "sha256": "dbf18e0da41ab76f9d883cf90636651b849d7d2a37359492b0b9d343589beaf2"
+      "sha256": "7180ebae54f2bea4c637ad67b93ed0cc8d299ca9b6fcfcc9e17ce88b22f31593"
     },
     {
       "file": "test/mfa-device-pg18.test.js",
@@ -88,7 +88,7 @@
     },
     {
       "file": "test/password-management-http.test.js",
-      "sha256": "8a2399ccdfb1a974e4e484a6197e814e76cc1719f385ddf8c6d021e1f9e948e8"
+      "sha256": "256180f35c9971cb3fa37046be35d9f9431669aa7abdf805bf4dd38c8c7182e5"
     },
     {
       "file": "test/personal-pages-http.test.js",
@@ -107,16 +107,20 @@
       "sha256": "dcb296942d784935f75c2c7b6399295fdbd4132a682ce783f6c4d7ed8c20644f"
     },
     {
+      "file": "test/security-followup-auth-routes.test.js",
+      "sha256": "0f6f3b945794b0c263831122bd435464932445396e5007b5ed723c52b2914dab"
+    },
+    {
       "file": "test/security-followup-input-http.test.js",
       "sha256": "606591ea4969bd3c09520fb50b80ccb2694a5dae65ac5d05488716ba4c7d594f"
     },
     {
       "file": "test/security-followup-pg18.test.js",
-      "sha256": "ca237042036a8ed6eaf8fa21793cadaf6fb300957cba5535b4a730e0ee0827da"
+      "sha256": "038405f8ae75a1c07855a594aa6fa061af6ce66212f0da76e63a1a35e097d447"
     },
     {
       "file": "test/security-followup-sockets.test.js",
-      "sha256": "55421f8c74d203dc827aab3b931ca35ee8246d97e1a0881c9f845ff5c92ef19e"
+      "sha256": "7e6dfe6d53c297e2dc7e6029c223b987814ba3cdbb5589a46fe171f542eca209"
     },
     {
       "file": "test/security-preparation-fresh-acl-pg18.test.js",
@@ -188,7 +192,7 @@
     },
     {
       "file": "test/subscription-phase5-http.test.js",
-      "sha256": "fa5a1a33b0e8ead09cadef851fa1b8a3b49b2ff3e223f3b0bdf0991320a3f87e"
+      "sha256": "795d66bfaf9a220841e2bbcfaa8af2c86727c8601855014e662f58a8c39c8c63"
     },
     {
       "file": "test/subscription-phase5.test.js",

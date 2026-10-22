@@ -46,6 +46,18 @@ test('HTTP bootstrap, HttpOnly signed context, lost first response resume, OTP s
  assert.equal((await f.db.query('SELECT count(*)::int AS n FROM sessions')).rows[0].n,1);
  assert.notEqual((await b.post('mfa/verify',v)).response.status,200);
 });
+test('followup MFA HTTP resend: cooldown, clock-bound resend, old-code denial and one-session consume',async t=>{
+ const f=await fixture(t),b=f.browser();await b.post('mfa/status');const first=(await b.post('password-login',login())).data;
+ const body={challengeId:first.challengeId,context:first.context,operationId:randomUUID()},oldCode=f.messages[0].code;
+ const tooSoon=await b.post('mfa/resend',body);assert.equal(tooSoon.response.status,429);assert.equal(tooSoon.data.code,'MFA_RESEND_COOLDOWN');assert.equal(f.messages.length,1);
+ await f.db.exec("UPDATE keeptimer_mfa_sends SET created_at=clock_timestamp()-interval '61 seconds'");
+ const resent=await b.post('mfa/resend',{...body,operationId:randomUUID()});assert.equal(resent.response.status,200);assert.equal(f.messages.length,2);
+ const current={challengeId:first.challengeId,context:first.context,operationId:randomUUID()};
+ assert.equal((await b.post('mfa/verify',{...current,code:oldCode})).response.status,401);
+ assert.equal((await b.post('mfa/verify',{...current,operationId:randomUUID(),code:f.messages.at(-1).code})).response.status,200);
+ assert.equal((await f.db.query('SELECT count(*)::int AS n FROM sessions')).rows[0].n,1);
+});
+
 test('HTTP sixth wrong returns precise lock/retry; new login same device stays locked, independent device succeeds',async t=>{
  const f=await fixture(t),a=f.browser(),b=f.browser();await a.post('mfa/status');await b.post('mfa/status');
  const first=(await a.post('password-login',login())).data;

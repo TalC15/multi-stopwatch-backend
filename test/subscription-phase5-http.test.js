@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import jwt from 'jsonwebtoken';
 import { actor, user, seededCustomer, resolve, scope } from './support/subscriptionPhase5.js';
 
-import {database,enable,rpcAdapter,ready} from './support/passwordAuth.js';
+import {database,enable,rpcAdapter,ready,fixturePassword} from './support/passwordAuth.js';
 
 test('Phase 5 real HTTP: private ownership, strict authority, Telegram and closed company/socket/login paths', async t => {
   const db=await database(t);await enable(db);const admin=await actor(db,'superadmin'),agent=await actor(db);
@@ -185,5 +185,17 @@ test('Phase 5 real HTTP: private ownership, strict authority, Telegram and close
       assert.equal(res.status, 401);
     }
     assert.equal((await db.query('SELECT enabled FROM keeptimer_sales_release')).rows[0].enabled, false);
+  });
+  await t.test('followup password change: old HTTP sessions revoke; password-account sockets are denied before and after change',async()=>{
+    process.env.AUTH_TOKEN_HMAC_KEY='a'.repeat(64);process.env.AUTH_RATE_HMAC_KEY='b'.repeat(64);
+    const socketPacket=async token=>{const o=await original(base+'/socket.io/?EIO=4&transport=polling');const sid=JSON.parse((await o.text()).slice(1)).sid;const e=base+'/socket.io/?EIO=4&transport=polling&sid='+sid;engines.push(e);await original(e,{method:'POST',body:'40'+JSON.stringify({token})});return (await original(e,{signal:AbortSignal.timeout(2000)})).text();};
+    assert.match(await socketPacket(accounts.active.token),/^44/);
+    const password='Changed-Synthetic-Password-2026!';
+    const headers={Origin:'https://fixture.example','Content-Type':'application/json','X-KeepTimer-CSRF':'1',Authorization:'Bearer '+accounts.active.token};
+    const changed=await original(base+'/auth/password/change',{method:'POST',headers,body:JSON.stringify({email:'active@example.test',currentPassword:fixturePassword,password})});assert.equal(changed.status,200);assert.equal((await changed.json()).requiresLogin,true);
+    assert.equal((await call('active','/timers/personal')).status,401);assert.match(await socketPacket(accounts.active.token),/^44/);
+    assert.equal((await db.query('SELECT revoked_at IS NOT NULL AS revoked FROM sessions WHERE id=$1',[accounts.active.session])).rows[0].revoked,true);
+    const fresh=await original(base+'/auth/password-login',{method:'POST',headers:{Origin:'https://fixture.example','Content-Type':'application/json','X-KeepTimer-CSRF':'1'},body:JSON.stringify({email:'active@example.test',password})});assert.equal(fresh.status,200);const current=await fresh.json();assert.match(await socketPacket(current.accessToken),/^44/);
+    assert.equal((await db.query('SELECT workspace_id FROM users WHERE id=$1',[accounts.active.id])).rows[0].workspace_id,accounts.active.workspace);
   });
 });

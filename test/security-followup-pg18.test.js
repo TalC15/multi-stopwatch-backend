@@ -25,7 +25,13 @@ test('followup PG18: all sensitive column ACLs, public EXECUTE inheritance, over
  for(const table of tables)for(const role of ['anon','authenticated','service_role'])for(const privilege of ['SELECT','INSERT','UPDATE','REFERENCES'])assert.equal((await db.query('SELECT has_any_column_privilege($1,$2::oid,$3) AS allowed',[role,table.oid,privilege])).rows[0].allowed,false,role+' '+privilege+' '+table.relname);
  const functions=(await db.query("SELECT p.oid::text AS oid,p.oid::regprocedure::text AS signature,p.prorettype='trigger'::regtype AS trigger,p.prosecdef,has_function_privilege('anon',p.oid,'EXECUTE') AS anon,has_function_privilege('authenticated',p.oid,'EXECUTE') AS authenticated FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public' AND p.proname LIKE 'keeptimer_%' ORDER BY signature")).rows;
  assert.ok(functions.length>20);
- for(const f of functions.filter(x=>x.prosecdef&&!x.trigger)){assert.equal(f.anon,false,f.signature);assert.equal(f.authenticated,false,f.signature);}
+ for(const f of functions.filter(x=>x.prosecdef&&!x.trigger)){
+  // Explicit migration grant for the RLS boolean predicate, not a PUBLIC
+  // wildcard or authority-bearing RPC. Assert the exact exception both ways.
+  const rlsPredicate=f.signature==='keeptimer_phase5_private_workspace(uuid)';
+  assert.equal(f.anon,rlsPredicate,f.signature);assert.equal(f.authenticated,rlsPredicate,f.signature);
+  if(rlsPredicate)assert.equal((await db.query("SELECT has_function_privilege('service_role',$1::oid,'EXECUTE') AS allowed",[f.oid])).rows[0].allowed,false);
+ }
  const publicGrants=(await db.query("SELECT p.oid::regprocedure::text AS signature FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace CROSS JOIN LATERAL aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a WHERE n.nspname='public' AND p.proname LIKE 'keeptimer_%' AND p.prosecdef AND p.prorettype<>'trigger'::regtype AND a.grantee=0 AND a.privilege_type='EXECUTE'")).rows;assert.deepEqual(publicGrants,[]);
  const sequences=(await db.query("SELECT c.oid::text AS oid,c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind='S'")).rows;
  for(const s of sequences)for(const role of ['anon','authenticated'])for(const privilege of ['SELECT','USAGE','UPDATE'])assert.equal((await db.query('SELECT has_sequence_privilege($1,$2::oid,$3) AS allowed',[role,s.oid,privilege])).rows[0].allowed,false);

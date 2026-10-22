@@ -26,7 +26,7 @@ test('followup real sockets: hostile rooms/events, expired/revoked sessions, bou
   if(table==='keeptimer_shared_request'){
    calls.push(body);try{return json((await db.query('SELECT public.keeptimer_shared_request($1,$2::jsonb) AS r',[body.p_actor_id,JSON.stringify(body.p_request)])).rows[0].r);}catch(e){return json({code:e.code,message:e.message},400);}
   }
-  assert.ok(['users','sessions'].includes(table));
+  assert.ok(['users','sessions','timers'].includes(table));
   const where=[],args=[];for(const k of ['id','user_id','role','username'])if(eq(k))where.push(k+'=$'+args.push(eq(k)));
   const row=(await db.query('SELECT * FROM public.'+table+(where.length?' WHERE '+where.join(' AND '):''),args)).rows[0];return row?json(row):json({code:'PGRST116'},406);
  };
@@ -58,6 +58,12 @@ test('followup real sockets: hostile rooms/events, expired/revoked sessions, bou
   await publish(actors.b,'B-private');await publish(actors.a,'A-fence');await publish(actors.b,'B-fence');
   const ar=await read(a,'A-fence'),br=await read(b,'B-fence');assert.deepEqual(ar.names,['A-fence']);assert.deepEqual(br.names,['B-private','B-fence']);
   assert.equal((await db.query("SELECT count(*)::int AS n FROM timers WHERE name='FORGED'")).rows[0].n,0);
+ });
+ await t.test('followup personal cancel: authenticated own timer has no DB mutation or provider effect',async()=>{
+  const id=randomUUID();await db.query("INSERT INTO timers(id,user_id,created_by,workspace_id,name,type,target_minutes,status,record_status,is_shared) VALUES($1,$2,$2,$3,'Personal','up',1,'idle','active',false)",[id,actors.peer.id,workspaces[0]]);
+  const before=(await db.query('SELECT * FROM timers WHERE id=$1',[id])).rows[0],count=calls.length;
+  const r=await original(base+'/timer/cancel',{method:'POST',headers:{Authorization:'Bearer '+actors.peer.token,'Content-Type':'application/json'},body:JSON.stringify({timerId:id})});assert.equal(r.status,200);assert.equal((await r.json()).success,true);
+  assert.deepEqual((await db.query('SELECT * FROM timers WHERE id=$1',[id])).rows[0],before);assert.equal(calls.length,count);
  });
  await t.test('followup revoked socket: committed other-instance revocation prevents the next private broadcast',async()=>{
   const socket=await connect(actors.a);await db.query('UPDATE sessions SET revoked_at=clock_timestamp() WHERE id=$1',[actors.a.session]);

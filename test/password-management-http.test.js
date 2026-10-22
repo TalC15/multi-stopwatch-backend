@@ -61,6 +61,9 @@ test('management HTTP uses real JWT/session middleware and MFA SQL; company PIN 
  assert.equal((await call(sa,`/admin/users/${privateAccount.id}`,'PATCH',{username:'private-owner',role:'manager',workspace_id:ws})).status,403);
  assert.equal((await call(sa,`/users/${worker.id}`,'DELETE',{})).status,200);
  assert.deepEqual(revoked,[worker.id,worker.id]);
+ const aliasMade=await call(sa,'/users/create','POST',{username:'http-alias-worker',pin:'fixture-company-pin',role:'worker',workspace_id:ws});assert.equal(aliasMade.status,200);const alias=(await aliasMade.json()).user;
+ assert.equal((await call(sa,`/admin/users/${alias.id}`,'DELETE',{})).status,200);
+ assert.deepEqual(revoked,[worker.id,worker.id,alias.id]);
  assert.equal((await db.query('SELECT disabled_at IS NOT NULL AS disabled FROM users WHERE id=$1',[worker.id])).rows[0].disabled,true);
  assert.equal((await db.query('SELECT enabled FROM keeptimer_sales_release')).rows[0].enabled,false);
  await db.query("UPDATE keeptimer_privileged_web_sessions SET verified_at=clock_timestamp()-interval '2 minutes',expires_at=clock_timestamp()-interval '1 second' WHERE session_id=$1",[sa.session]);
