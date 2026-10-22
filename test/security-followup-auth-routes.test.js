@@ -8,7 +8,7 @@ import {mountPasswordAuth} from '../src/passwordAuth.js';
 import {mountSubscriptionSales} from '../src/subscriptionSales.js';
 import {createWebAuthGuard,webAuthErrorHandler} from '../src/webAuth.js';
 import {database,rpcAdapter,privileged,start,accept,verify,command} from './support/mfaDevice.js';
-import {customer,fixturePassword} from './support/passwordAuth.js';
+import {customer,fixturePassword,cutover} from './support/passwordAuth.js';
 import {rpcAdapter as salesAdapter} from './support/subscriptionPhase3.js';
 const origin='https://fixture.example',secret='followup-auth-routes-fixture-only';
 const env={AUTH_PUBLIC_ORIGIN:origin,AUTH_ALLOWED_ORIGINS:origin,AUTH_TOKEN_HMAC_KEY:'a'.repeat(64),AUTH_RATE_HMAC_KEY:'b'.repeat(64)};
@@ -33,11 +33,15 @@ test('followup auth HTTP: activation/reset consume, single-use, owned sessions a
 });
 
 test('followup sales HTTP: exact Superadmin Agent lifecycle routes reject lower role and keep secrets outside responses',async t=>{
- const db=await database(t),sa=await privileged(db),pending=await start(db,sa);await accept(db,pending.args);const factor=verify(pending.args);assert.equal((await command(db,'verify',factor)).ok,true);sa.session=factor.session_id;await db.exec('UPDATE keeptimer_sales_release SET enabled=true');
+ // Full isolated installation: the preparation-only device fixture deliberately
+ // omits the cutover sales wrapper that accepts the current email contract.
+ // Run the unchanged guarded migration with closed fixture gates, before users.
+ const db=await database(t,{enabled:false});await db.exec("SET keeptimer.phase7_cutover='confirmed-maintenance'");await db.exec(cutover);await db.exec('UPDATE keeptimer_auth_release SET enabled=true');
+ const sa=await privileged(db),pending=await start(db,sa);await accept(db,pending.args);const factor=verify(pending.args);assert.equal((await command(db,'verify',factor)).ok,true);sa.session=factor.session_id;await db.exec('UPDATE keeptimer_sales_release SET enabled=true');
  process.env.SUBSCRIPTION_IDEMPOTENCY_HMAC_KEY='a'.repeat(64);
  const app=express();app.use(express.json());const adapter=salesAdapter(db);mountSubscriptionSales({app,authenticate:authenticate(db),db:adapter,origins:new Set([origin])});const base=await server(t,app),access=tokens.generateAccessToken({id:sa.id},sa.session);
  const call=(path,body)=>fetch(base+path,{method:body===undefined?'GET':'POST',headers:{Origin:origin,'Content-Type':'application/json','X-KeepTimer-CSRF':'1','Idempotency-Key':randomUUID(),Authorization:'Bearer '+access},...(body===undefined?{}:{body:JSON.stringify(body)})});
- const made=await call('/admin/agents',{username:'followup_agent',mfaEmail:'agent@example.test'});assert.equal(made.status,200);const agent=await made.json();assert.equal(agent.loginReady,false);assert.equal(agent.mustChangePassword,true);assert.ok(agent.agentId);
+ const made=await call('/admin/agents',{username:'followup_agent',mfaEmail:'agent@example.test'});const agent=await made.json();assert.equal(made.status,200,JSON.stringify(agent));assert.equal(agent.loginReady,false);assert.equal(agent.mustChangePassword,true);assert.ok(agent.agentId);
  const list=await call('/admin/agents');assert.equal(list.status,200);assert.ok((await list.json()).items.some(x=>x.id===agent.agentId));
  for(const p of ['/admin/agents/'+agent.agentId+'/password-reset','/agent/customers/'+agent.agentId+'/password-reset']){const r=await call(p,{});assert.equal(r.status,403);assert.doesNotMatch(await r.text(),/password_hash|pin_hash|refresh_token/);}
  const revoke=await call('/admin/agents/'+agent.agentId+'/revoke',{});assert.equal(revoke.status,200);assert.equal((await db.query('SELECT disabled_at IS NOT NULL AS disabled FROM users WHERE id=$1',[agent.agentId])).rows[0].disabled,true);

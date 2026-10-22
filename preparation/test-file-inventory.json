@@ -108,7 +108,7 @@
     },
     {
       "file": "test/security-followup-auth-routes.test.js",
-      "sha256": "0f6f3b945794b0c263831122bd435464932445396e5007b5ed723c52b2914dab"
+      "sha256": "e317c489cdd2596c743fb0df21c6872bcf8d4df1eb5ccae3d9cf41252935eed0"
     },
     {
       "file": "test/security-followup-input-http.test.js",
