@@ -8,7 +8,7 @@ import {mountPasswordAuth} from '../src/passwordAuth.js';
 import {mountSubscriptionSales} from '../src/subscriptionSales.js';
 import {createWebAuthGuard,webAuthErrorHandler} from '../src/webAuth.js';
 import {database,rpcAdapter,privileged,start,accept,verify,command} from './support/mfaDevice.js';
-import {customer,fixturePassword,cutover} from './support/passwordAuth.js';
+import {customer,fixturePassword,fixtureHash,ready,cutover} from './support/passwordAuth.js';
 import {rpcAdapter as salesAdapter} from './support/subscriptionPhase3.js';
 const origin='https://fixture.example',secret='followup-auth-routes-fixture-only';
 const env={AUTH_PUBLIC_ORIGIN:origin,AUTH_ALLOWED_ORIGINS:origin,AUTH_TOKEN_HMAC_KEY:'a'.repeat(64),AUTH_RATE_HMAC_KEY:'b'.repeat(64)};
@@ -43,6 +43,15 @@ test('followup sales HTTP: exact Superadmin Agent lifecycle routes reject lower 
  const call=(path,body)=>fetch(base+path,{method:body===undefined?'GET':'POST',headers:{Origin:origin,'Content-Type':'application/json','X-KeepTimer-CSRF':'1','Idempotency-Key':randomUUID(),Authorization:'Bearer '+access},...(body===undefined?{}:{body:JSON.stringify(body)})});
  const made=await call('/admin/agents',{username:'followup_agent',mfaEmail:'agent@example.test'});const agent=await made.json();assert.equal(made.status,200,JSON.stringify(agent));assert.equal(agent.loginReady,false);assert.equal(agent.mustChangePassword,true);assert.ok(agent.agentId);
  const list=await call('/admin/agents');assert.equal(list.status,200);assert.ok((await list.json()).items.some(x=>x.id===agent.agentId));
+ // Controlled isolated second factor, not a real provider/MFA acceptance claim.
+ await db.query('UPDATE users SET password_hash=$1 WHERE id=$2',[fixtureHash,agent.agentId]);await ready(db,agent.agentId);
+ const second=await start(db,{id:agent.agentId});await accept(db,second.args);const agentFactor=verify(second.args);assert.equal((await command(db,'verify',agentFactor)).ok,true);
+ const agentAccess=tokens.generateAccessToken({id:agent.agentId},agentFactor.session_id);
+ const before=(await db.query('SELECT (SELECT count(*) FROM users)::int AS users,(SELECT count(*) FROM admin_audit_log)::int AS audit,(SELECT count(*) FROM keeptimer_sales_requests)::int AS receipts')).rows;
+ for(const [path,body] of [['/admin/agents',undefined],['/admin/agents',{username:'forged_agent',mfaEmail:'forged@example.test'}],['/admin/agents/'+agent.agentId+'/revoke',{}]]){
+  const denied=await fetch(base+path,{method:body===undefined?'GET':'POST',headers:{Origin:origin,'Content-Type':'application/json','X-KeepTimer-CSRF':'1','Idempotency-Key':randomUUID(),Authorization:'Bearer '+agentAccess},...(body===undefined?{}:{body:JSON.stringify(body)})});assert.equal(denied.status,403);assert.doesNotMatch(await denied.text(),/password_hash|pin_hash|refresh_token/);
+ }
+ assert.deepEqual((await db.query('SELECT (SELECT count(*) FROM users)::int AS users,(SELECT count(*) FROM admin_audit_log)::int AS audit,(SELECT count(*) FROM keeptimer_sales_requests)::int AS receipts')).rows,before);
  for(const p of ['/admin/agents/'+agent.agentId+'/password-reset','/agent/customers/'+agent.agentId+'/password-reset']){const r=await call(p,{});assert.equal(r.status,403);assert.doesNotMatch(await r.text(),/password_hash|pin_hash|refresh_token/);}
  const revoke=await call('/admin/agents/'+agent.agentId+'/revoke',{});assert.equal(revoke.status,200);assert.equal((await db.query('SELECT disabled_at IS NOT NULL AS disabled FROM users WHERE id=$1',[agent.agentId])).rows[0].disabled,true);
 });

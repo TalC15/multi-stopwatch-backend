@@ -11,17 +11,17 @@ test('followup real sockets: hostile rooms/events, expired/revoked sessions, bou
  await user(db,'superadmin');const workspaces=[];
  for(const name of ['A','B'])workspaces.push((await db.query('INSERT INTO workspaces(name,shared_mode_enabled) VALUES($1,true) RETURNING id',[name])).rows[0].id);
  const auth=await import('../src/auth.js'),actors={};
- for(const [name,w] of [['a',0],['peer',0],['b',1]]){
+ for(const [name,w] of [['a',0],['peer',0],['b',1],['guarded',0],['disabled',0]]){
   const id=await user(db,'worker',{workspace_id:workspaces[w]}),session=randomUUID(),refresh=auth.generateRefreshToken({id},session);
   await db.query('INSERT INTO sessions(id,user_id,refresh_token_hash) VALUES($1,$2,$3)',[session,id,auth.hashToken(refresh)]);actors[name]={id,session,token:auth.generateAccessToken({id},session),workspace:workspaces[w]};
  }
- const original=globalThis.fetch,engines=[],calls=[];
+ const original=globalThis.fetch,engines=[],calls=[];let scopeFailure=null;
  const json=(x,status=200)=>new Response(JSON.stringify(x),{status,headers:{'Content-Type':'application/json'}});
  globalThis.fetch=async(request,options={})=>{
   const url=new URL(request.url??request),body=options.body?JSON.parse(options.body):null;
   if(url.origin!=='http://127.0.0.1:54321'){assert.equal(url.hostname,'127.0.0.1','No external network');return original(request,options);}
   const table=url.pathname.split('/').at(-1),eq=k=>url.searchParams.get(k)?.replace(/^eq\./,'');
-  if(table==='keeptimer_resolve_entitlement')return json(await resolve(db,body.p_user_id));
+  if(table==='keeptimer_resolve_entitlement')return body.p_user_id===scopeFailure?json({code:'UNAVAILABLE'},503):json(await resolve(db,body.p_user_id));
   if(table==='keeptimer_auth_session')return json(false);
   if(table==='keeptimer_shared_request'){
    calls.push(body);try{return json((await db.query('SELECT public.keeptimer_shared_request($1,$2::jsonb) AS r',[body.p_actor_id,JSON.stringify(body.p_request)])).rows[0].r);}catch(e){return json({code:e.code,message:e.message},400);}
@@ -81,5 +81,17 @@ test('followup real sockets: hostile rooms/events, expired/revoked sessions, bou
  await t.test('followup scope: company workspace transfer is rejected by DB and reconnect always rechecks revoked session',async()=>{
   await assert.rejects(db.query('UPDATE users SET workspace_id=$1 WHERE id=$2',[workspaces[1],actors.peer.id]),/COMPANY_WORKSPACE_IMMUTABLE/);
   const o=await original(base+'/socket.io/?EIO=4&transport=polling');const sid=JSON.parse((await o.text()).slice(1)).sid;const endpoint=base+'/socket.io/?EIO=4&transport=polling&sid='+sid;engines.push(endpoint);await original(endpoint,{method:'POST',body:'40'+JSON.stringify({token:actors.a.token})});assert.match(await(await original(endpoint,{signal:AbortSignal.timeout(2500)})).text(),/^44/);
+ });
+ await t.test('followup live recipient: disabled user cannot receive the next committed workspace event',async()=>{
+  const socket=await connect(actors.disabled);await db.query('UPDATE users SET disabled_at=clock_timestamp() WHERE id=$1',[actors.disabled.id]);
+  const peer=await connect(actors.peer);await publish(actors.peer,'AFTER-DISABLE');assert.ok((await read(peer,'AFTER-DISABLE')).names.includes('AFTER-DISABLE'));
+  assert.ok(!(await read(socket,'AFTER-DISABLE')).names.includes('AFTER-DISABLE'));
+ });
+ await t.test('followup live recipient: unavailable authority fails closed without suppressing healthy peers or retrying commands',async()=>{
+  const socket=await connect(actors.guarded),peer=await connect(actors.peer);scopeFailure=actors.guarded.id;const before=calls.length;
+  try{await publish(actors.peer,'AUTHORITY-UNAVAILABLE');assert.ok((await read(peer,'AUTHORITY-UNAVAILABLE')).names.includes('AUTHORITY-UNAVAILABLE'));assert.ok(!(await read(socket,'AUTHORITY-UNAVAILABLE')).names.includes('AUTHORITY-UNAVAILABLE'));assert.equal(calls.length,before+1);}
+  finally{scopeFailure=null;}
+  // A fresh handshake after recovery uses the live same-account session.
+  const recovered=await connect(actors.guarded);await publish(actors.peer,'AFTER-AUTHORITY-RECOVERY');assert.ok((await read(recovered,'AFTER-AUTHORITY-RECOVERY')).names.includes('AFTER-AUTHORITY-RECOVERY'));
  });
 });

@@ -87,7 +87,36 @@ const io = new Server(httpServer, {
 });
 
 // Versioned shared routes precede the legacy routes; personal routes stay intact.
-mountSharedTimers({ app, authenticate, db: supabase, io, sendTelegramMessage });
+// A room records handshake scope, not continuing authority. Re-check every
+// recipient immediately before each event, including revocations on other
+// instances. This does not retry or change any committed shared command.
+async function publishWorkspaceEvent(workspaceId, event, data) {
+  const room = `workspace-${workspaceId}`;
+  const recipients = [...(io.sockets.adapter.rooms.get(room) ?? [])]
+    .map(id => io.sockets.sockets.get(id)).filter(Boolean);
+  await Promise.allSettled(recipients.map(async socket => {
+    try {
+      const userId = socket.data.user?.id;
+      // Scope first; the final credential/session read must follow its awaits.
+      const denied = await subscriptionCore.currentAccountScopeError(userId);
+      const token = socket.handshake.auth?.token;
+      const current = denied ? null : await validateAccessToken(token);
+      const claims = verifyToken(token); // Expiry can cross a DB/network await.
+      if (!current?.ok || !claims || current.user.id !== userId ||
+          current.sessionId !== socket.data.sessionId ||
+          !['worker','manager'].includes(current.user.role) ||
+          current.user.workspace_id !== workspaceId) {
+        socket.disconnect(true);
+        return;
+      }
+      if (socket.connected && socket.rooms.has(room)) socket.emit(event, data);
+    } catch {
+      socket.disconnect(true); // Authority unavailable: never publish cached data.
+    }
+  }));
+}
+mountSharedTimers({ app, authenticate, db: supabase, io, sendTelegramMessage,
+  publishTimerEvent: publishWorkspaceEvent });
 const sharedUpdateRequired = res => res.status(426).json({
   error: "Ortak sayaç için sunucu komut protokolü gerekli", code: "SHARED_PROTOCOL_REQUIRED",
 });
@@ -1166,7 +1195,7 @@ app.post("/timers", authenticate, async (req, res) => {
   if (data.is_shared && data.workspace_id) {
     const targetMs = Number(data.target_minutes || 0) * 60 * 1000;
 
-    io.to(`workspace-${data.workspace_id}`).emit("timer-event", {
+    await publishWorkspaceEvent(data.workspace_id, "timer-event", {
       event: "created",
       data: {
         id: data.id,
@@ -1350,7 +1379,7 @@ app.patch("/timers/:id", authenticate, async (req, res) => {
     }
 
     if (Object.keys(socketData).length > 1) {
-      io.to(`workspace-${existing.workspace_id}`).emit("timer-event", {
+      await publishWorkspaceEvent(existing.workspace_id, "timer-event", {
         event: "updated",
         data: socketData,
       });
@@ -1430,7 +1459,7 @@ app.delete("/timers/:id", authenticate, async (req, res) => {
 
   // Shared timer ancak soft-delete DB'de doğrulandıktan sonra yayınlanır.
   if (existing.is_shared && existing.workspace_id) {
-    io.to(`workspace-${existing.workspace_id}`).emit("timer-event", {
+    await publishWorkspaceEvent(existing.workspace_id, "timer-event", {
       event: "deleted",
       data: { id },
     });

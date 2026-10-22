@@ -26,15 +26,15 @@
     "src/nativeAuth.js": "1276b7e497099a11278f381443f0e49d64561c59f15ab1c6eede4c7d6ab20ae2",
     "src/passwordAuth.js": "a91f11c59e5541d876f0cbef9bc5e37e89abfbc51ff4b02c4da61ea06d449243",
     "src/privilegedManagement.js": "6e8b7a558c024ce6506063a44115137cf095c5321cfbe8c61794cdd094703c3c",
-    "src/server.js": "d9b7d44016bb5f5d75a9d9270da0fbf3935916e1a1dc006886044c95285d7e50",
-    "src/sharedTimers.js": "4f07bc6d18fb6720298f0aec02a41d70e95bcfb7382a81da8fdc0eca1b72c832",
+    "src/server.js": "21fc59728d41f3f8379e4232e4a8b1c4c2a0a170b11a255f91edb62eb25393a2",
+    "src/sharedTimers.js": "2414bb3eec44cb6acdd812261a761c49213a10424a32d0cc14072f905c4b5ebd",
     "src/subscriptions.js": "f176b3ce0b17ea3c3c9c3166aad85d9e2f93f0b0500aaa22901a2f377ddc9d22",
     "src/subscriptionSales.js": "7c0b5a6a0b4794090f3dcf69eaf2c950d9f9f07d38223cbe27a5bd93af92655c",
     "src/telegram.js": "ba5b8b5ebb267fe625b6be7346b95551ba71ec67550855dd603ca841392c22a5",
     "src/timers.js": "570a1b86893a19c91cf3ecaa1bb767e806ccaf68b3d6f699deab20d8a7d85320",
     "src/webAuth.js": "57848aaf2ec36b1f123ccbcbd74e5bd4e278c3db6ce861bffa8a4220eeee2ee2"
   },
-  "sourceManifestSha256": "c6c0e4b937b4a81c9a6743222460dcc3cadded961894c51e000fb5882660f625",
+  "sourceManifestSha256": "6a23a61b3d6adcef23e17c18dcd0cd40f7c710ac41e5d71c88d242e90d78ba29",
   "gateStatus": "SOURCE_VERIFIED_RENDER_INTEGRATION_SEPARATE",
   "runtimeStatus": "READY_FOR_GITHUB_HOSTED_EXECUTION_NOT_RUN",
   "provenance": "current-source-provenance.json",
@@ -45,5 +45,7 @@
     "renderIntegrationOnly": "scripts/ci/assert-render-deployment.mjs"
   },
   "manifestByteSource": "git blob at reviewed revision; exact hashes, no runtime line-ending normalization",
-  "testFollowupBase": "b8bb46700efd4f6fa066523ce68bb75e4e9f46c3"
+  "testFollowupBase": "b8bb46700efd4f6fa066523ce68bb75e4e9f46c3",
+  "localPatchBase": "0aad6b81f88b779cf158dc9c66d0b2276cb8c9c0",
+  "localPatchStatus": "REVIEWED_UNCOMMITTED_NOT_RUNTIME_TESTED"
 }
