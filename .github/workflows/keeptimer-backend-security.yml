@@ -62,8 +62,6 @@ jobs:
     if: inputs.suite == 'all' || inputs.suite == 'postgres18'
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    env:
-      KT_CI_RUNNER_ENVIRONMENT: ${{ runner.environment }}
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -76,6 +74,8 @@ jobs:
         run: node scripts/ci/assert-prepared-source.mjs
       - run: npm ci
       - name: Guarded disposable PostgreSQL 18 concurrency suites
+        env:
+          KT_CI_RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: bash scripts/ci/run-pg18-security-tests.sh
       - name: Preserve synthetic PostgreSQL evidence
         if: always()
