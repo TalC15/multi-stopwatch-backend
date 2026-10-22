@@ -108,7 +108,7 @@
     },
     {
       "file": "test/security-followup-auth-routes.test.js",
-      "sha256": "e317c489cdd2596c743fb0df21c6872bcf8d4df1eb5ccae3d9cf41252935eed0"
+      "sha256": "ac79ba9cd6dfd6160d89c046858d01e6dbc9acbf6cdff78738f0a14fb020c33e"
     },
     {
       "file": "test/security-followup-input-http.test.js",
@@ -120,7 +120,7 @@
     },
     {
       "file": "test/security-followup-sockets.test.js",
-      "sha256": "7e6dfe6d53c297e2dc7e6029c223b987814ba3cdbb5589a46fe171f542eca209"
+      "sha256": "9fcc81152763064167da33613a59ad81a8593e415dc57c83a656d7e6bfc944b4"
     },
     {
       "file": "test/security-preparation-fresh-acl-pg18.test.js",
@@ -144,7 +144,7 @@
     },
     {
       "file": "test/shared-http.test.js",
-      "sha256": "fcd844b20d2cd5a5c2355700c76fc0df887f0d86a4f03805519a83106977c800"
+      "sha256": "614b643018f095421ffd38f3d0c0cdc771bf935c1730a141bb298f672b660061"
     },
     {
       "file": "test/subscription-concurrency.test.js",

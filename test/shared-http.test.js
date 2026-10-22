@@ -8,14 +8,14 @@ const body=extra=>({protocol:5,command:'pause',timerId:ids.shared,mutationId:ids
 const timer=extra=>({id:ids.shared,user_id:ids.worker,workspace_id:ids.company,is_shared:true,
  shared_revision:'2',record_status:'active',status:'paused',name:'Canonical',type:'up',target_minutes:1,is_pay:false,accumulated_ms:2000,...extra});
 const frame=extra=>({protocol:5,workspaceId:ids.company,generation:'2',serverNow:'2026-09-28T00:00:00Z',success:true,...extra});
-async function fixture(t){
+async function fixture(t,delivery={}){
  const calls=[],sockets=[],scheduled=[],cancelled=[],sent=[];let result=frame({timer:timer(),mutationId:ids.deleted}),error=null;
  const db={rpc:async(name,args)=>{calls.push({name,args});return {data:result,error};},from(){return {select(){return this;},eq(){return this;},is(){return this;},async not(){return{data:[{telegram_chat_id:'one'},{telegram_chat_id:'one'}]};}};}};
  const app=express();app.use(express.json());
  const auth=(req,res,next)=>{if(req.headers.authorization!=='fixture')return res.sendStatus(401);req.user={id:ids.worker,workspace_id:ids.company};next();};
  const service=mountSharedTimers({app,authenticate:auth,db,io:{to:room=>({emit:(event,data)=>sockets.push({room,event,data})})},
-  sendTelegramMessage:async(...args)=>sent.push(args),now:()=>Date.parse('2026-09-28T00:00:00Z'),
-  setTimeout:(callback,delay)=>{const item={callback,delay};scheduled.push(item);return item;},clearTimeout:item=>cancelled.push(item)});
+  sendTelegramMessage:async(...args)=>{sent.push(args);delivery.onTelegram?.();},now:()=>Date.parse('2026-09-28T00:00:00Z'),
+  setTimeout:(callback,delay)=>{const item={callback,delay};scheduled.push(item);return item;},clearTimeout:item=>cancelled.push(item),...delivery});
  const server=app.listen(0,'127.0.0.1');await once(server,'listening');
  t.after(async()=>{service.dispose();server.closeAllConnections();await new Promise(r=>server.close(r));});
  const request=(payload,path='/timers/shared/commands',authHeader='fixture')=>fetch(`http://127.0.0.1:${server.address().port}${path}`,
@@ -102,4 +102,20 @@ test('shared HTTP rejects a positive zero-ms target before RPC and accepts a one
  assert.equal((await f.request(create)).status,400);assert.equal(f.calls.length,0);
  assert.equal((await f.request({...create,targetMinutes:1/60000})).status,200);
  assert.equal(f.calls.length,1);
+});
+test('held recipient delivery cannot hold canonical ACK, alarm scheduling or claimed Telegram; late rejection never retries', {timeout:5000},async t=>{
+ let rejectDelivery,started=0;const held=new Promise((_,reject)=>{rejectDelivery=reject;});
+ t.after(()=>rejectDelivery(Error('fixture cleanup')));
+ let delivered;const telegram=new Promise(resolve=>{delivered=resolve;});
+ const f=await fixture(t,{publishTimerEvent:()=>{started++;return held;},onTelegram:delivered});
+ const running=timer({status:'running',shared_run_id:ids.session,ends_at:'2026-09-28T00:00:00Z',shared_revision:'2'});
+ const committed=frame({timer:running,mutationId:ids.deleted});f.set(committed);
+ const bounded=p=>Promise.race([p,new Promise((_,reject)=>{const id=setTimeout(()=>reject(Error('Recipient delivery held a committed command/job')),1000);id.unref();})]);
+ const response=await bounded(f.request(body()));assert.equal(response.status,200);assert.deepEqual(await response.json(),committed);
+ assert.equal(started,1);assert.equal(f.scheduled.length,1);assert.equal(f.sent.length,0);
+ f.set(frame({timer:{...running,shared_revision:'3',shared_alarm_claimed:true}}));f.scheduled[0].callback();
+ await bounded(telegram);
+ assert.equal(started,2);assert.equal(f.sent.length,1);assert.equal(f.calls.filter(x=>x.name==='keeptimer_shared_request').length,1);assert.equal(f.calls.filter(x=>x.name==='keeptimer_shared_due').length,1);
+ rejectDelivery(Error('late recipient failure'));await new Promise(r=>setImmediate(r));
+ assert.equal(f.sent.length,1);assert.equal(f.calls.length,2);assert.equal(f.scheduled.length,1);
 });

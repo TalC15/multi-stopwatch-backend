@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {once} from 'node:events';
 import {randomUUID} from 'node:crypto';
 import jwt from 'jsonwebtoken';
+import {runInNewContext} from 'node:vm';
 import {database,user,resolve} from './support/subscriptionPhase2.js';
 
 test('followup real sockets: hostile rooms/events, expired/revoked sessions, bounded frames and canonical recipient isolation', {timeout:45000},async t=>{
@@ -11,24 +12,26 @@ test('followup real sockets: hostile rooms/events, expired/revoked sessions, bou
  await user(db,'superadmin');const workspaces=[];
  for(const name of ['A','B'])workspaces.push((await db.query('INSERT INTO workspaces(name,shared_mode_enabled) VALUES($1,true) RETURNING id',[name])).rows[0].id);
  const auth=await import('../src/auth.js'),actors={};
- for(const [name,w] of [['a',0],['peer',0],['b',1]]){
+ for(const [name,w] of [['a',0],['peer',0],['b',1],['guarded',0],['disabled',0],['delayed',0]]){
   const id=await user(db,'worker',{workspace_id:workspaces[w]}),session=randomUUID(),refresh=auth.generateRefreshToken({id},session);
   await db.query('INSERT INTO sessions(id,user_id,refresh_token_hash) VALUES($1,$2,$3)',[session,id,auth.hashToken(refresh)]);actors[name]={id,session,token:auth.generateAccessToken({id},session),workspace:workspaces[w]};
  }
- const original=globalThis.fetch,engines=[],calls=[];
+ const original=globalThis.fetch,engines=[],calls=[];let scopeFailure=null,heldRecipient=null;
  const json=(x,status=200)=>new Response(JSON.stringify(x),{status,headers:{'Content-Type':'application/json'}});
  globalThis.fetch=async(request,options={})=>{
   const url=new URL(request.url??request),body=options.body?JSON.parse(options.body):null;
   if(url.origin!=='http://127.0.0.1:54321'){assert.equal(url.hostname,'127.0.0.1','No external network');return original(request,options);}
   const table=url.pathname.split('/').at(-1),eq=k=>url.searchParams.get(k)?.replace(/^eq\./,'');
-  if(table==='keeptimer_resolve_entitlement')return json(await resolve(db,body.p_user_id));
+  if(table==='keeptimer_resolve_entitlement')return body.p_user_id===scopeFailure?json({code:'UNAVAILABLE'},503):json(await resolve(db,body.p_user_id));
   if(table==='keeptimer_auth_session')return json(false);
   if(table==='keeptimer_shared_request'){
    calls.push(body);try{return json((await db.query('SELECT public.keeptimer_shared_request($1,$2::jsonb) AS r',[body.p_actor_id,JSON.stringify(body.p_request)])).rows[0].r);}catch(e){return json({code:e.code,message:e.message},400);}
   }
   assert.ok(['users','sessions','timers'].includes(table));
   const where=[],args=[];for(const k of ['id','user_id','role','username'])if(eq(k))where.push(k+'=$'+args.push(eq(k)));
-  const row=(await db.query('SELECT * FROM public.'+table+(where.length?' WHERE '+where.join(' AND '):''),args)).rows[0];return row?json(row):json({code:'PGRST116'},406);
+  const row=(await db.query('SELECT * FROM public.'+table+(where.length?' WHERE '+where.join(' AND '):''),args)).rows[0];
+  const held=heldRecipient;if(table==='sessions'&&eq('id')===held?.session){held.enter();await held.promise;held.returned();}
+  return row?json(row):json({code:'PGRST116'},406);
  };
  const {httpServer}=await import('../src/server.js');if(!httpServer.listening)await once(httpServer,'listening');const base='http://127.0.0.1:'+httpServer.address().port;
  t.after(async()=>{for(const endpoint of engines)await original(endpoint,{method:'POST',body:'1'}).catch(()=>{});globalThis.fetch=original;httpServer.closeAllConnections();await new Promise(r=>httpServer.close(r));});
@@ -44,7 +47,7 @@ test('followup real sockets: hostile rooms/events, expired/revoked sessions, bou
   const names=[];for(let i=0;i<4;i++){
    const r=await original(socket.endpoint,{signal:AbortSignal.timeout(2500)});if(r.status===400)return {names,closed:true};
    const packet=await r.text();for(const part of packet.split('\x1e')){
-    if(part==='1'||part.startsWith('41'))return {names,closed:true};
+    if(part==='1'||part.startsWith('41'))return {names,closed:true,namespaceDisconnect:part.startsWith('41')};
     if(part==='2'){await original(socket.endpoint,{method:'POST',body:'3'});continue;}
     if(part.startsWith('42')){const [event,data]=JSON.parse(part.slice(2));if(event==='timer-event')names.push(data.data.timer.name);}
    }
@@ -81,5 +84,50 @@ test('followup real sockets: hostile rooms/events, expired/revoked sessions, bou
  await t.test('followup scope: company workspace transfer is rejected by DB and reconnect always rechecks revoked session',async()=>{
   await assert.rejects(db.query('UPDATE users SET workspace_id=$1 WHERE id=$2',[workspaces[1],actors.peer.id]),/COMPANY_WORKSPACE_IMMUTABLE/);
   const o=await original(base+'/socket.io/?EIO=4&transport=polling');const sid=JSON.parse((await o.text()).slice(1)).sid;const endpoint=base+'/socket.io/?EIO=4&transport=polling&sid='+sid;engines.push(endpoint);await original(endpoint,{method:'POST',body:'40'+JSON.stringify({token:actors.a.token})});assert.match(await(await original(endpoint,{signal:AbortSignal.timeout(2500)})).text(),/^44/);
+ });
+ await t.test('followup live recipient: disabled user cannot receive the next committed workspace event',async()=>{
+  const socket=await connect(actors.disabled);await db.query('UPDATE users SET disabled_at=clock_timestamp() WHERE id=$1',[actors.disabled.id]);
+  const peer=await connect(actors.peer);await publish(actors.peer,'AFTER-DISABLE');assert.ok((await read(peer,'AFTER-DISABLE')).names.includes('AFTER-DISABLE'));
+  assert.ok(!(await read(socket,'AFTER-DISABLE')).names.includes('AFTER-DISABLE'));
+ });
+ await t.test('followup live recipient: unavailable authority fails closed without suppressing healthy peers or retrying commands',async()=>{
+  const socket=await connect(actors.guarded),peer=await connect(actors.peer);scopeFailure=actors.guarded.id;const before=calls.length;
+  try{await publish(actors.peer,'AUTHORITY-UNAVAILABLE');assert.ok((await read(peer,'AUTHORITY-UNAVAILABLE')).names.includes('AUTHORITY-UNAVAILABLE'));const observed=await read(socket,'AUTHORITY-UNAVAILABLE');assert.ok(!observed.names.includes('AUTHORITY-UNAVAILABLE'));assert.equal(observed.closed,true);assert.notEqual(observed.namespaceDisconnect,true,'Namespace disconnect would disable automatic recovery');assert.equal(calls.length,before+1);}
+  finally{scopeFailure=null;}
+  // A fresh handshake after recovery uses the live same-account session.
+  const recovered=await connect(actors.guarded);await publish(actors.peer,'AFTER-AUTHORITY-RECOVERY');assert.ok((await read(recovered,'AFTER-AUTHORITY-RECOVERY')).names.includes('AFTER-AUTHORITY-RECOVERY'));
+ });
+ await t.test('followup actual client: expired connection automatically reconnects with fresh authenticated handshake and canonical events',async clientTest=>{
+  // Use the actual client bundle served by this Socket.IO server, not a stub
+  // and not a new dependency/CDN. Node 22 supplies the browser WebSocket API.
+  const bundle=await original(base+'/socket.io/socket.io.js');assert.equal(bundle.status,200);
+  const context={WebSocket,URL,setTimeout,clearTimeout,setInterval,clearInterval,console};runInNewContext(await bundle.text(),context);
+  assert.equal(typeof context.io,'function');let attempts=0;const reasons=[],seen=[],expiry=Math.floor(Date.now()/1000)+1;
+  const short=jwt.sign({id:actors.guarded.id,sessionId:actors.guarded.session,type:'access',exp:expiry},process.env.JWT_SECRET);
+  const client=context.io(base,{autoConnect:false,transports:['websocket'],reconnection:true,reconnectionDelay:20,reconnectionDelayMax:50,randomizationFactor:0,auth:callback=>callback({token:attempts++===0?short:actors.guarded.token})});
+  clientTest.after(()=>client.disconnect());client.on('disconnect',reason=>reasons.push({reason,active:client.active}));client.on('timer-event',data=>seen.push(data.data.timer.name));
+  const bounded=p=>Promise.race([p,new Promise((_,reject)=>{const timer=setTimeout(()=>reject(Error('Automatic client recovery timed out')),4000);timer.unref();})]);
+  const first=once(client,'connect');client.connect();await bounded(first);
+  await new Promise(r=>setTimeout(r,Math.max(0,expiry*1000-Date.now()+20)));
+  const reconnected=once(client,'connect');await publish(actors.peer,'CLIENT-EXPIRED');await bounded(reconnected);
+  assert.ok(attempts>=2);assert.equal(reasons[0].active,true);assert.notEqual(reasons[0].reason,'io server disconnect');assert.ok(!seen.includes('CLIENT-EXPIRED'));
+  const received=new Promise(resolve=>client.on('timer-event',data=>{if(data.data.timer.name==='CLIENT-RECOVERED')resolve();}));await publish(actors.peer,'CLIENT-RECOVERED');await bounded(received);assert.ok(seen.includes('CLIENT-RECOVERED'));
+ });
+ await t.test('held recipient SQL: ACK and healthy peer proceed; bounded expiry fences stale late reply from replacement session',async delayedTest=>{
+  const socket=await connect(actors.delayed),peer=await connect(actors.peer);let release,enter,returned,released=false;
+  const entered=new Promise(r=>{enter=r;}),finished=new Promise(r=>{returned=r;}),promise=new Promise(r=>{release=()=>{released=true;r();};});
+  delayedTest.after(()=>{heldRecipient=null;release();});heldRecipient={session:actors.delayed.session,promise,enter,returned};
+  const bounded=(p,ms)=>Promise.race([p,new Promise((_,reject)=>{const id=setTimeout(()=>reject(Error('Held recipient exceeded independent progress deadline')),ms);id.unref();})]);
+  const before=calls.length,ack=publish(actors.peer,'HELD-RECIPIENT');await bounded(entered,1000);await bounded(ack,1000);
+  assert.equal(released,false);assert.ok((await read(peer,'HELD-RECIPIENT')).names.includes('HELD-RECIPIENT'));
+  const closed=await bounded(read(socket,'HELD-RECIPIENT'),3000);assert.equal(closed.closed,true);assert.ok(!closed.names.includes('HELD-RECIPIENT'));assert.notEqual(closed.namespaceDisconnect,true);assert.equal(released,false);
+  // The held query already read an authorized row; revoke it while suspended.
+  await db.query('UPDATE sessions SET revoked_at=clock_timestamp() WHERE id=$1',[actors.delayed.session]);heldRecipient=null;
+  const fresh={...actors.delayed,session:randomUUID()};fresh.token=auth.generateAccessToken({id:fresh.id},fresh.session);
+  await db.query('INSERT INTO sessions(id,user_id,refresh_token_hash) VALUES($1,$2,$3)',[fresh.session,fresh.id,'replacement-fixture']);const replacement=await connect(fresh);
+  release();await finished;await new Promise(r=>setImmediate(r));await new Promise(r=>setImmediate(r));
+  await publish(actors.peer,'AFTER-LATE-RECIPIENT');const observed=await read(replacement,'AFTER-LATE-RECIPIENT');assert.deepEqual(observed.names,['AFTER-LATE-RECIPIENT']);assert.equal(observed.closed,false);
+  assert.equal(calls.length,before+2);assert.equal((await db.query("SELECT count(*)::int AS n FROM timers WHERE name='HELD-RECIPIENT'")).rows[0].n,1);
+  assert.equal((await db.query('SELECT revoked_at IS NULL AS active FROM sessions WHERE id=$1',[fresh.session])).rows[0].active,true);
  });
 });

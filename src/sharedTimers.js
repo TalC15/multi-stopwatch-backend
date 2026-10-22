@@ -22,13 +22,16 @@ export function sharedError(error) {
   return [503,'Ortak sayaç sunucusuna erişilemiyor'];
 }
 export function mountSharedTimers({ app, authenticate, db, io, sendTelegramMessage,
+  publishTimerEvent = (workspaceId, event, data) => io.to(`workspace-${workspaceId}`).emit(event, data),
   setTimeout: later = globalThis.setTimeout, clearTimeout: clear = globalThis.clearTimeout, now = Date.now }) {
   const jobs = new Map();
   function publish(envelope) {
     if (!envelope?.timer) return;
-    io.to(`workspace-${envelope.workspaceId}`).emit('timer-event', {
+    // Recipient checks are delivery work, never part of a committed command's
+    // ACK, alarm scheduling or already-claimed Telegram delivery.
+    void Promise.resolve().then(() => publishTimerEvent(envelope.workspaceId, 'timer-event', {
       event: envelope.timer.record_status === 'deleted' ? 'deleted' : 'updated', data: envelope,
-    });
+    })).catch(() => { /* Delivery failure must not retry the committed command. */ });
   }
   async function fire(row) {
     try {
@@ -75,7 +78,7 @@ export function mountSharedTimers({ app, authenticate, db, io, sendTelegramMessa
     try {
       const {data,error}=await db.rpc('keeptimer_shared_request',{p_actor_id:req.user.id,p_request:req.body});
       if (error || data?.success!==true || !data?.timer) { const [status,message]=sharedError(error); return res.status(status).json({error:message}); }
-      publish(data); reconcileJob(data.timer); return res.json(data);
+      reconcileJob(data.timer); publish(data); return res.json(data);
     } catch { return res.status(503).json({error:'Ortak işlem sonucu doğrulanamadı'}); }
   });
   app.get('/timers/shared',authenticate,async (req,res,next)=>{
