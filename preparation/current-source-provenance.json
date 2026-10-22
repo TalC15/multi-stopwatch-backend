@@ -1,0 +1,15 @@
+{
+  "revision": "bcadc7cd55536e1f81efa7176360400cbcb19451",
+  "repository": "TalC15/multi-stopwatch-backend",
+  "branch": "main",
+  "sourceEvidence": "GitHub API and git clone/archive observed this run",
+  "renderMatch": "UNVERIFIED; only Render-targeted integration requires deploy evidence",
+  "preparedSourceComparison": {
+    "files": 100,
+    "lineEndingOnlyDifferences": 100,
+    "semanticDifferences": 0
+  },
+  "productChanges": 0,
+  "includesSecrets": false,
+  "hostedOnly": true
+}

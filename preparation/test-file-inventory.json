@@ -1,0 +1,244 @@
+{
+  "revision": "bcadc7cd55536e1f81efa7176360400cbcb19451",
+  "status": "SOURCE_INVENTORY_NOT_TEST_RESULT",
+  "files": [
+    {
+      "file": "test/account-ui-telegram.test.js",
+      "sha256": "0f00de13ac82b4433238679238487d4e967ef80d34254a68e22a10d518c6370f"
+    },
+    {
+      "file": "test/auth-disabled.test.js",
+      "sha256": "7188f0c90057412de52547ec99e034553c4e59898a54d40e8b1c290cc538584b"
+    },
+    {
+      "file": "test/auth-log.test.js",
+      "sha256": "a92ca9e2ff0b00e2049f3c91242539c0c6822e45a3cbe94b5baa90dd1676da72"
+    },
+    {
+      "file": "test/company-account.test.js",
+      "sha256": "b3e0e0370b6f10c8ef197b4ebaf6befca04b2b780ef5e92a7ea1a598e53115f0"
+    },
+    {
+      "file": "test/concurrency.test.js",
+      "sha256": "579f042a71ed254e7faa1722bab53971b541b1f187ac8aa9583f8bffc0aacd23"
+    },
+    {
+      "file": "test/deactivation-guards.test.js",
+      "sha256": "3dcacc63491d76c943030f49cb437e70f739bdc87d91948826456051c209ad7e"
+    },
+    {
+      "file": "test/http-disabled.test.js",
+      "sha256": "6741720959e347f8de186a7240a4e36ba0f7ccbc9a7d9abf2b6f1ef3bfc47edc"
+    },
+    {
+      "file": "test/legacy-database-safety.test.js",
+      "sha256": "a256f465c34b814a0ed9829c3f8daaeabb72335af35489cd6be40d246601a972"
+    },
+    {
+      "file": "test/mfa-device-http.test.js",
+      "sha256": "20f6453fbee9f198ea8cd0d8408fcdebecdf41d7f9734d062d89517cb89a1d68"
+    },
+    {
+      "file": "test/mfa-device-pg18.test.js",
+      "sha256": "a874a77d2c88960e41b03776639bd6d9475d213e0ca0046d75edf23dbe19b7d8"
+    },
+    {
+      "file": "test/mfa-device-sql.test.js",
+      "sha256": "253bef41b11b254ecc731216c6cf6020acf15beb2a74b359d21e5e75c91097af"
+    },
+    {
+      "file": "test/mfa-review-r2-pg18.test.js",
+      "sha256": "b731c750353034f7bf05a5d92f403590cb11ae3333935655f4e311705a30de80"
+    },
+    {
+      "file": "test/mfa-review-r2.test.js",
+      "sha256": "12857a4a0f589a8bc6dc766df10afce3d9bd156bd8fe8e07232ba858110dcce7"
+    },
+    {
+      "file": "test/notification-disabled.test.js",
+      "sha256": "1c23bd68fdc6cc45b1f13eb66833f6eda32c1d3606529b862bd9633d5bafe231"
+    },
+    {
+      "file": "test/notification-race.test.js",
+      "sha256": "a42e212e7f35798f086bc4587ccf308ddf2905c43f3ad2588ff3d93444cbcb57"
+    },
+    {
+      "file": "test/password-auth-concurrency.test.js",
+      "sha256": "ab5e3a270bfe63330b1dc34bbd725e75d239bd0f8b26cc9f59a77ed10b244abd"
+    },
+    {
+      "file": "test/password-auth-http.test.js",
+      "sha256": "e0886be079ab19c6a721275e2563086a6f201cace2030fa22c96f4f5547e7542"
+    },
+    {
+      "file": "test/password-auth-pg18-revision.test.js",
+      "sha256": "e05354ae811ab280c8476de2897f0aabb1e3774d3f886874b0f9f593bcb7d3e7"
+    },
+    {
+      "file": "test/password-auth-revision.test.js",
+      "sha256": "f846a644d56aed908fdc670406399d3a4d0812c457265a30f28baee2df9b8b61"
+    },
+    {
+      "file": "test/password-auth-security-regression.test.js",
+      "sha256": "3d6b2fb5fdd132e5c9d3e65e816f0cba0a31f3dec3910c0117997b7f7ed91eac"
+    },
+    {
+      "file": "test/password-auth.test.js",
+      "sha256": "15b5b3806b27accc6a5a0d4f02d1ab14591f0aef85a1593d42e4f675e101841e"
+    },
+    {
+      "file": "test/password-management-http.test.js",
+      "sha256": "9b3bb5fc6e62c2309e214da56814b54530b96575f860ec336883bc9bafd52f5c"
+    },
+    {
+      "file": "test/personal-pages-http.test.js",
+      "sha256": "1cd60bca7a61cb7b7039e88dc070f684ed0f5d8af6f5bb3b77cf4b228b697342"
+    },
+    {
+      "file": "test/personal-sync-http.test.js",
+      "sha256": "c43877e8450bfa549762856abb7d78704287cf7e0d739bc1a4f7f686bfe4cc38"
+    },
+    {
+      "file": "test/personal-sync.test.js",
+      "sha256": "969f3c5beed47a461293f29a50a32894fa3127ca5c2551591f2f70f9f8c8cbf2"
+    },
+    {
+      "file": "test/security-e2e-injection.test.js",
+      "sha256": "dcb296942d784935f75c2c7b6399295fdbd4132a682ce783f6c4d7ed8c20644f"
+    },
+    {
+      "file": "test/security-preparation-fresh-acl-pg18.test.js",
+      "sha256": "c8f9a25b74a320940ea18ac3dd91734c97d7fec9b8b752361935cc866196ceb1"
+    },
+    {
+      "file": "test/security-preparation-fresh-acl.test.js",
+      "sha256": "22be8a9705656815e2361247f1586591b9217c83862e368e2dc012524f7fbd72"
+    },
+    {
+      "file": "test/security-preparation-login-budget.test.js",
+      "sha256": "03628bf121b47830ae2a1d5aa10bcda0d138131621ea94379b6e5000699938b3"
+    },
+    {
+      "file": "test/security-preparation-shared-input.test.js",
+      "sha256": "00cef92994122d88391b71b6b83aad85372db87ec0207d6301ac67d71cb8474f"
+    },
+    {
+      "file": "test/shared-concurrency.test.js",
+      "sha256": "9e6718ffad31970a3a34ad5cf90117fe5d350fb7843825ebccfc5689d6c07c2b"
+    },
+    {
+      "file": "test/shared-http.test.js",
+      "sha256": "bf851648f070563d851ddcaccc136426b37c40adc35ad519d97bc4fc42428de5"
+    },
+    {
+      "file": "test/subscription-concurrency.test.js",
+      "sha256": "3ae9954ab944ca357ca7dd3e2e86940181cb84008851b7d6c8fed166a4d157f6"
+    },
+    {
+      "file": "test/subscription-database-safety.test.js",
+      "sha256": "550b24cecafc1ef4c7fcd0eb4942a89d430dbec7a8c101f66db2e0989ab44a07"
+    },
+    {
+      "file": "test/subscription-phase1.test.js",
+      "sha256": "27821a4be8a0118ed6b37b2cc54913b836e93361a01c386517da8344ebb83d88"
+    },
+    {
+      "file": "test/subscription-phase2-concurrency.test.js",
+      "sha256": "db42fdc8b98841d54865aaee1b71654b54a5bf9bde808d1d8d78d85b9921bd0e"
+    },
+    {
+      "file": "test/subscription-phase2-http.test.js",
+      "sha256": "bf0814dfbc6a5beaaf960ca4d7ebe970b64802ff61076ec433017d21cf2dda27"
+    },
+    {
+      "file": "test/subscription-phase2-validation.test.js",
+      "sha256": "5e32116e7ed12f1fcb3898f702773615a87a4ad4633ca70b2b5ed924e45b980a"
+    },
+    {
+      "file": "test/subscription-phase2.test.js",
+      "sha256": "fdd859c7b42ed68a3b9d41a90829d243663eff4bfa6beb4cdc7b1159a074c8cc"
+    },
+    {
+      "file": "test/subscription-phase3-concurrency.test.js",
+      "sha256": "12d7e43e6bfa61fca879f72ee5dde27708ede81fd0d47a9e6fcd19efdfcd62ed"
+    },
+    {
+      "file": "test/subscription-phase3-http.test.js",
+      "sha256": "4168fd985acf207ef282946f112d1bd4e7fd8b50e660d502cb52f7509516cf5e"
+    },
+    {
+      "file": "test/subscription-phase3.test.js",
+      "sha256": "7d7ec5bb954d94351f58db6ac111ddb0bb934803795be2f4a9efa3f2ee2384c3"
+    },
+    {
+      "file": "test/subscription-phase5-concurrency.test.js",
+      "sha256": "edec5d7e1061dde44c14af52686c5252a5b1b95da7989bf87be260fd8b44afed"
+    },
+    {
+      "file": "test/subscription-phase5-http.test.js",
+      "sha256": "a885a1a18a46a7debaefb0f80f29c8d68acf0e0aae042db0b79cb9d9ab51ea83"
+    },
+    {
+      "file": "test/subscription-phase5.test.js",
+      "sha256": "7fc65e7594b96de932b1cb8462b439f03e6ec2ab334fe57f9399709f1cbc8065"
+    },
+    {
+      "file": "test/subscription-phase6-concurrency.test.js",
+      "sha256": "a042ea136abaaab4e5f7599a5148157624c492efe268934207872d66e34dc3f5"
+    },
+    {
+      "file": "test/subscription-phase6.test.js",
+      "sha256": "496af9689347486e65188edabdcb6224d1a68e2c88a5431937dbf8b7bd7c3bac"
+    },
+    {
+      "file": "test/telegram-privacy.test.js",
+      "sha256": "527c1fb635a87b8766293ddbb7be792dbe511cfcbf3679d28575c659beaa950b"
+    },
+    {
+      "file": "test/web-auth.test.js",
+      "sha256": "c77b17d8a5e5db85dc4d2b8c4cdaba94fc5d405b1be8ec649192953a1e56e316"
+    }
+  ],
+  "supportFiles": [
+    {
+      "file": "test/support/database.js",
+      "sha256": "ea04f2d660052d81194cde23441f07e3cace7df32ce8936e9456f1a72354fb64"
+    },
+    {
+      "file": "test/support/mfaDevice.js",
+      "sha256": "1edb7ae3bcb91a530ae04fa92460b747d8eec705f315003fe1fc09c5047fb23e"
+    },
+    {
+      "file": "test/support/passwordAuth.js",
+      "sha256": "0b11467ce28ba0a34ec395170ce1b34e5333cf701e6bbc92173edaa51848ff88"
+    },
+    {
+      "file": "test/support/securityPreparationFreshAcl.js",
+      "sha256": "bff46357b0f8df6e1a2fc03af9a3976ceafe7fdf3ff694adf22141561bc2ad8d"
+    },
+    {
+      "file": "test/support/subscriptionDatabase.js",
+      "sha256": "c26e220e2801b52b7e1afb8a3061187190edf9aecf9fe7d5c78d446ca9847555"
+    },
+    {
+      "file": "test/support/subscriptionHttp.js",
+      "sha256": "cee8936d358e7e04cb4187bdd3eb92b43f816050465ab97e69de2436ac733ca1"
+    },
+    {
+      "file": "test/support/subscriptionPhase2.js",
+      "sha256": "49b9c4f3fdddc38d77979ae44e258a7167a7c2ea6e321f755465cfc17b082b29"
+    },
+    {
+      "file": "test/support/subscriptionPhase3.js",
+      "sha256": "3308a445d1ec1dcb5dab945b9e61a2dda3bd045626702c5818e7c74f39078007"
+    },
+    {
+      "file": "test/support/subscriptionPhase5.js",
+      "sha256": "dde4e503eea9eb4a9f816f505622eb571cde4f3459113bf300fad05c0d29ef54"
+    },
+    {
+      "file": "test/support/subscriptionPhase6.js",
+      "sha256": "9f969acc87767e7c4802fe0f447a7829bdce879a00d1083d83e2ca1c111b1229"
+    }
+  ]
+}

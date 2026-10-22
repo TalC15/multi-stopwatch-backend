@@ -1,0 +1,87 @@
+name: KeepTimer backend security checks
+
+# Preparation only: committing this workflow does NOT start a test run.
+'on':
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: Suite to run on GitHub-hosted machines
+        type: choice
+        required: true
+        default: all
+        options: [all, unit, postgres18]
+
+defaults:
+  run:
+    working-directory: .
+
+permissions:
+  contents: read
+
+concurrency:
+  group: keeptimer-backend-security-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  unit:
+    if: inputs.suite == 'all' || inputs.suite == 'unit'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Require reviewed local source integrity (no Render dependency)
+        run: node scripts/ci/assert-prepared-source.mjs
+      - run: npm ci
+      - name: Unit and HTTP regression suite with synthetic I/O
+        shell: bash
+        run: |
+          set -euo pipefail
+          unset TEST_DATABASE_URL SUBSCRIPTION_TEST_DATABASE_URL SUBSCRIPTION_TEST_CLUSTER_NAME PHASE5_DISPOSABLE_DB_APPROVED
+          mkdir -p reports
+          node --version > reports/unit-runtime.txt
+          node --test --test-concurrency=1 --test-reporter=tap test/*.test.js > reports/unit.tap 2>&1
+      - name: Redact runtime evidence
+        if: always()
+        run: node scripts/ci/sanitize-evidence.mjs
+      - name: Preserve synthetic test evidence
+        if: always()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: keeptimer-unit-${{ github.run_id }}-${{ github.run_attempt }}
+          path: reports/unit*
+          retention-days: 7
+          if-no-files-found: warn
+
+  postgres18:
+    if: inputs.suite == 'all' || inputs.suite == 'postgres18'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      KT_CI_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Require reviewed local source integrity (no Render dependency)
+        run: node scripts/ci/assert-prepared-source.mjs
+      - run: npm ci
+      - name: Guarded disposable PostgreSQL 18 concurrency suites
+        run: bash scripts/ci/run-pg18-security-tests.sh
+      - name: Preserve synthetic PostgreSQL evidence
+        if: always()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: keeptimer-pg18-${{ github.run_id }}-${{ github.run_attempt }}
+          path: reports/pg18*
+          retention-days: 7
+          if-no-files-found: warn
