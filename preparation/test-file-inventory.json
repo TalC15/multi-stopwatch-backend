@@ -144,7 +144,7 @@
     },
     {
       "file": "test/shared-http.test.js",
-      "sha256": "cc56d7a93d4c4d338c867c265bbdcdcec14af33b979d67b171bb3d2ad8a2a21f"
+      "sha256": "614b643018f095421ffd38f3d0c0cdc771bf935c1730a141bb298f672b660061"
     },
     {
       "file": "test/subscription-concurrency.test.js",
