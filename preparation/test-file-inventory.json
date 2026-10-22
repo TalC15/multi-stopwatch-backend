@@ -120,7 +120,7 @@
     },
     {
       "file": "test/security-followup-sockets.test.js",
-      "sha256": "21fdddd5d18e716251c8eeb8612a6631497131ed516f9f6ed2a6de83b8213d12"
+      "sha256": "9fcc81152763064167da33613a59ad81a8593e415dc57c83a656d7e6bfc944b4"
     },
     {
       "file": "test/security-preparation-fresh-acl-pg18.test.js",
@@ -144,7 +144,7 @@
     },
     {
       "file": "test/shared-http.test.js",
-      "sha256": "fcd844b20d2cd5a5c2355700c76fc0df887f0d86a4f03805519a83106977c800"
+      "sha256": "cc56d7a93d4c4d338c867c265bbdcdcec14af33b979d67b171bb3d2ad8a2a21f"
     },
     {
       "file": "test/subscription-concurrency.test.js",

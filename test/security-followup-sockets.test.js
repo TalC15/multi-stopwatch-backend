@@ -12,11 +12,11 @@ test('followup real sockets: hostile rooms/events, expired/revoked sessions, bou
  await user(db,'superadmin');const workspaces=[];
  for(const name of ['A','B'])workspaces.push((await db.query('INSERT INTO workspaces(name,shared_mode_enabled) VALUES($1,true) RETURNING id',[name])).rows[0].id);
  const auth=await import('../src/auth.js'),actors={};
- for(const [name,w] of [['a',0],['peer',0],['b',1],['guarded',0],['disabled',0]]){
+ for(const [name,w] of [['a',0],['peer',0],['b',1],['guarded',0],['disabled',0],['delayed',0]]){
   const id=await user(db,'worker',{workspace_id:workspaces[w]}),session=randomUUID(),refresh=auth.generateRefreshToken({id},session);
   await db.query('INSERT INTO sessions(id,user_id,refresh_token_hash) VALUES($1,$2,$3)',[session,id,auth.hashToken(refresh)]);actors[name]={id,session,token:auth.generateAccessToken({id},session),workspace:workspaces[w]};
  }
- const original=globalThis.fetch,engines=[],calls=[];let scopeFailure=null;
+ const original=globalThis.fetch,engines=[],calls=[];let scopeFailure=null,heldRecipient=null;
  const json=(x,status=200)=>new Response(JSON.stringify(x),{status,headers:{'Content-Type':'application/json'}});
  globalThis.fetch=async(request,options={})=>{
   const url=new URL(request.url??request),body=options.body?JSON.parse(options.body):null;
@@ -29,7 +29,9 @@ test('followup real sockets: hostile rooms/events, expired/revoked sessions, bou
   }
   assert.ok(['users','sessions','timers'].includes(table));
   const where=[],args=[];for(const k of ['id','user_id','role','username'])if(eq(k))where.push(k+'=$'+args.push(eq(k)));
-  const row=(await db.query('SELECT * FROM public.'+table+(where.length?' WHERE '+where.join(' AND '):''),args)).rows[0];return row?json(row):json({code:'PGRST116'},406);
+  const row=(await db.query('SELECT * FROM public.'+table+(where.length?' WHERE '+where.join(' AND '):''),args)).rows[0];
+  const held=heldRecipient;if(table==='sessions'&&eq('id')===held?.session){held.enter();await held.promise;held.returned();}
+  return row?json(row):json({code:'PGRST116'},406);
  };
  const {httpServer}=await import('../src/server.js');if(!httpServer.listening)await once(httpServer,'listening');const base='http://127.0.0.1:'+httpServer.address().port;
  t.after(async()=>{for(const endpoint of engines)await original(endpoint,{method:'POST',body:'1'}).catch(()=>{});globalThis.fetch=original;httpServer.closeAllConnections();await new Promise(r=>httpServer.close(r));});
@@ -110,5 +112,22 @@ test('followup real sockets: hostile rooms/events, expired/revoked sessions, bou
   const reconnected=once(client,'connect');await publish(actors.peer,'CLIENT-EXPIRED');await bounded(reconnected);
   assert.ok(attempts>=2);assert.equal(reasons[0].active,true);assert.notEqual(reasons[0].reason,'io server disconnect');assert.ok(!seen.includes('CLIENT-EXPIRED'));
   const received=new Promise(resolve=>client.on('timer-event',data=>{if(data.data.timer.name==='CLIENT-RECOVERED')resolve();}));await publish(actors.peer,'CLIENT-RECOVERED');await bounded(received);assert.ok(seen.includes('CLIENT-RECOVERED'));
+ });
+ await t.test('held recipient SQL: ACK and healthy peer proceed; bounded expiry fences stale late reply from replacement session',async delayedTest=>{
+  const socket=await connect(actors.delayed),peer=await connect(actors.peer);let release,enter,returned,released=false;
+  const entered=new Promise(r=>{enter=r;}),finished=new Promise(r=>{returned=r;}),promise=new Promise(r=>{release=()=>{released=true;r();};});
+  delayedTest.after(()=>{heldRecipient=null;release();});heldRecipient={session:actors.delayed.session,promise,enter,returned};
+  const bounded=(p,ms)=>Promise.race([p,new Promise((_,reject)=>{const id=setTimeout(()=>reject(Error('Held recipient exceeded independent progress deadline')),ms);id.unref();})]);
+  const before=calls.length,ack=publish(actors.peer,'HELD-RECIPIENT');await bounded(entered,1000);await bounded(ack,1000);
+  assert.equal(released,false);assert.ok((await read(peer,'HELD-RECIPIENT')).names.includes('HELD-RECIPIENT'));
+  const closed=await bounded(read(socket,'HELD-RECIPIENT'),3000);assert.equal(closed.closed,true);assert.ok(!closed.names.includes('HELD-RECIPIENT'));assert.notEqual(closed.namespaceDisconnect,true);assert.equal(released,false);
+  // The held query already read an authorized row; revoke it while suspended.
+  await db.query('UPDATE sessions SET revoked_at=clock_timestamp() WHERE id=$1',[actors.delayed.session]);heldRecipient=null;
+  const fresh={...actors.delayed,session:randomUUID()};fresh.token=auth.generateAccessToken({id:fresh.id},fresh.session);
+  await db.query('INSERT INTO sessions(id,user_id,refresh_token_hash) VALUES($1,$2,$3)',[fresh.session,fresh.id,'replacement-fixture']);const replacement=await connect(fresh);
+  release();await finished;await new Promise(r=>setImmediate(r));await new Promise(r=>setImmediate(r));
+  await publish(actors.peer,'AFTER-LATE-RECIPIENT');const observed=await read(replacement,'AFTER-LATE-RECIPIENT');assert.deepEqual(observed.names,['AFTER-LATE-RECIPIENT']);assert.equal(observed.closed,false);
+  assert.equal(calls.length,before+2);assert.equal((await db.query("SELECT count(*)::int AS n FROM timers WHERE name='HELD-RECIPIENT'")).rows[0].n,1);
+  assert.equal((await db.query('SELECT revoked_at IS NULL AS active FROM sessions WHERE id=$1',[fresh.session])).rows[0].active,true);
  });
 });
