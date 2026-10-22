@@ -106,12 +106,14 @@ async function publishWorkspaceEvent(workspaceId, event, data) {
           current.sessionId !== socket.data.sessionId ||
           !['worker','manager'].includes(current.user.role) ||
           current.user.workspace_id !== workspaceId) {
-        socket.disconnect(true);
+        // Transport close preserves the client's bounded reconnect/auth flow;
+        // namespace disconnect would leave an otherwise healthy client inactive.
+        socket.conn.close();
         return;
       }
       if (socket.connected && socket.rooms.has(room)) socket.emit(event, data);
     } catch {
-      socket.disconnect(true); // Authority unavailable: never publish cached data.
+      socket.conn.close(); // Authority unavailable: never publish cached data.
     }
   }));
 }

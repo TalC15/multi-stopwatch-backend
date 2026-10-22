@@ -44,7 +44,7 @@ test('followup real sockets: hostile rooms/events, expired/revoked sessions, bou
   const names=[];for(let i=0;i<4;i++){
    const r=await original(socket.endpoint,{signal:AbortSignal.timeout(2500)});if(r.status===400)return {names,closed:true};
    const packet=await r.text();for(const part of packet.split('\x1e')){
-    if(part==='1'||part.startsWith('41'))return {names,closed:true};
+    if(part==='1'||part.startsWith('41'))return {names,closed:true,namespaceDisconnect:part.startsWith('41')};
     if(part==='2'){await original(socket.endpoint,{method:'POST',body:'3'});continue;}
     if(part.startsWith('42')){const [event,data]=JSON.parse(part.slice(2));if(event==='timer-event')names.push(data.data.timer.name);}
    }
@@ -89,7 +89,7 @@ test('followup real sockets: hostile rooms/events, expired/revoked sessions, bou
  });
  await t.test('followup live recipient: unavailable authority fails closed without suppressing healthy peers or retrying commands',async()=>{
   const socket=await connect(actors.guarded),peer=await connect(actors.peer);scopeFailure=actors.guarded.id;const before=calls.length;
-  try{await publish(actors.peer,'AUTHORITY-UNAVAILABLE');assert.ok((await read(peer,'AUTHORITY-UNAVAILABLE')).names.includes('AUTHORITY-UNAVAILABLE'));assert.ok(!(await read(socket,'AUTHORITY-UNAVAILABLE')).names.includes('AUTHORITY-UNAVAILABLE'));assert.equal(calls.length,before+1);}
+  try{await publish(actors.peer,'AUTHORITY-UNAVAILABLE');assert.ok((await read(peer,'AUTHORITY-UNAVAILABLE')).names.includes('AUTHORITY-UNAVAILABLE'));const observed=await read(socket,'AUTHORITY-UNAVAILABLE');assert.ok(!observed.names.includes('AUTHORITY-UNAVAILABLE'));assert.equal(observed.closed,true);assert.notEqual(observed.namespaceDisconnect,true,'Namespace disconnect would disable automatic recovery');assert.equal(calls.length,before+1);}
   finally{scopeFailure=null;}
   // A fresh handshake after recovery uses the live same-account session.
   const recovered=await connect(actors.guarded);await publish(actors.peer,'AFTER-AUTHORITY-RECOVERY');assert.ok((await read(recovered,'AFTER-AUTHORITY-RECOVERY')).names.includes('AFTER-AUTHORITY-RECOVERY'));

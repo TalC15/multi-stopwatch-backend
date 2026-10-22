@@ -7,7 +7,7 @@ import {once} from 'node:events';
 import {mountPasswordAuth} from '../src/passwordAuth.js';
 import {mountSubscriptionSales} from '../src/subscriptionSales.js';
 import {createWebAuthGuard,webAuthErrorHandler} from '../src/webAuth.js';
-import {database,rpcAdapter,privileged,start,accept,verify,command} from './support/mfaDevice.js';
+import {database,rpcAdapter,privileged,start,accept,verify,command,scope} from './support/mfaDevice.js';
 import {customer,fixturePassword,fixtureHash,ready,cutover} from './support/passwordAuth.js';
 import {rpcAdapter as salesAdapter} from './support/subscriptionPhase3.js';
 const origin='https://fixture.example',secret='followup-auth-routes-fixture-only';
@@ -45,7 +45,7 @@ test('followup sales HTTP: exact Superadmin Agent lifecycle routes reject lower 
  const list=await call('/admin/agents');assert.equal(list.status,200);assert.ok((await list.json()).items.some(x=>x.id===agent.agentId));
  // Controlled isolated second factor, not a real provider/MFA acceptance claim.
  await db.query('UPDATE users SET password_hash=$1 WHERE id=$2',[fixtureHash,agent.agentId]);await ready(db,agent.agentId);
- const second=await start(db,{id:agent.agentId});await accept(db,second.args);const agentFactor=verify(second.args);assert.equal((await command(db,'verify',agentFactor)).ok,true);
+ const second=await start(db,{id:agent.agentId},scope('e'));assert.equal(second.result.ok,true);await accept(db,second.args);const agentFactor=verify(second.args);assert.equal((await command(db,'verify',agentFactor)).ok,true);
  const agentAccess=tokens.generateAccessToken({id:agent.agentId},agentFactor.session_id);
  const before=(await db.query('SELECT (SELECT count(*) FROM users)::int AS users,(SELECT count(*) FROM admin_audit_log)::int AS audit,(SELECT count(*) FROM keeptimer_sales_requests)::int AS receipts')).rows;
  for(const [path,body] of [['/admin/agents',undefined],['/admin/agents',{username:'forged_agent',mfaEmail:'forged@example.test'}],['/admin/agents/'+agent.agentId+'/revoke',{}]]){

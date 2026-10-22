@@ -108,7 +108,7 @@
     },
     {
       "file": "test/security-followup-auth-routes.test.js",
-      "sha256": "e10b00a5be4adfebb94d242988b4c9301429282126a321cedeac6b7e2ff044e8"
+      "sha256": "ac79ba9cd6dfd6160d89c046858d01e6dbc9acbf6cdff78738f0a14fb020c33e"
     },
     {
       "file": "test/security-followup-input-http.test.js",
@@ -120,7 +120,7 @@
     },
     {
       "file": "test/security-followup-sockets.test.js",
-      "sha256": "fc574345dd130593e03ac7cc5d20df059d740d17b6cd1f7ba66a0e062f9d2723"
+      "sha256": "5b74563bb0dd511dd48897b83f8e12f202a5be3151a9cba90b5a314cd6a9edcb"
     },
     {
       "file": "test/security-preparation-fresh-acl-pg18.test.js",
