@@ -25,11 +25,13 @@ export function mountSharedTimers({ app, authenticate, db, io, sendTelegramMessa
   publishTimerEvent = (workspaceId, event, data) => io.to(`workspace-${workspaceId}`).emit(event, data),
   setTimeout: later = globalThis.setTimeout, clearTimeout: clear = globalThis.clearTimeout, now = Date.now }) {
   const jobs = new Map();
-  async function publish(envelope) {
+  function publish(envelope) {
     if (!envelope?.timer) return;
-    await publishTimerEvent(envelope.workspaceId, 'timer-event', {
+    // Recipient checks are delivery work, never part of a committed command's
+    // ACK, alarm scheduling or already-claimed Telegram delivery.
+    void Promise.resolve().then(() => publishTimerEvent(envelope.workspaceId, 'timer-event', {
       event: envelope.timer.record_status === 'deleted' ? 'deleted' : 'updated', data: envelope,
-    });
+    })).catch(() => { /* Delivery failure must not retry the committed command. */ });
   }
   async function fire(row) {
     try {
@@ -46,7 +48,7 @@ export function mountSharedTimers({ app, authenticate, db, io, sendTelegramMessa
           typeof timer.name!=='string' || !timer.name.trim() || typeof timer.is_pay!=='boolean' ||
           !Number.isFinite(Number(timer.target_minutes)) || Math.trunc(Number(timer.target_minutes)*60000)<1 ||
           !((timer.type==='up' && timer.status==='running') || (timer.type==='down' && timer.status==='completed'))) return;
-      await publish(data);
+      publish(data);
       const members = await db.from('users').select('telegram_chat_id').eq('workspace_id',data.workspaceId)
         .is('disabled_at',null).not('telegram_chat_id','is',null);
       if (members.error) return;
@@ -76,7 +78,7 @@ export function mountSharedTimers({ app, authenticate, db, io, sendTelegramMessa
     try {
       const {data,error}=await db.rpc('keeptimer_shared_request',{p_actor_id:req.user.id,p_request:req.body});
       if (error || data?.success!==true || !data?.timer) { const [status,message]=sharedError(error); return res.status(status).json({error:message}); }
-      await publish(data); reconcileJob(data.timer); return res.json(data);
+      reconcileJob(data.timer); publish(data); return res.json(data);
     } catch { return res.status(503).json({error:'Ortak işlem sonucu doğrulanamadı'}); }
   });
   app.get('/timers/shared',authenticate,async (req,res,next)=>{

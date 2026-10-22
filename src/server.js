@@ -95,25 +95,43 @@ async function publishWorkspaceEvent(workspaceId, event, data) {
   const recipients = [...(io.sockets.adapter.rooms.get(room) ?? [])]
     .map(id => io.sockets.sockets.get(id)).filter(Boolean);
   await Promise.allSettled(recipients.map(async socket => {
+    let active = true, timeout;
+    const deadline = Date.now() + 1500;
     try {
-      const userId = socket.data.user?.id;
-      // Scope first; the final credential/session read must follow its awaits.
-      const denied = await subscriptionCore.currentAccountScopeError(userId);
-      const token = socket.handshake.auth?.token;
-      const current = denied ? null : await validateAccessToken(token);
-      const claims = verifyToken(token); // Expiry can cross a DB/network await.
-      if (!current?.ok || !claims || current.user.id !== userId ||
-          current.sessionId !== socket.data.sessionId ||
-          !['worker','manager'].includes(current.user.role) ||
-          current.user.workspace_id !== workspaceId) {
-        // Transport close preserves the client's bounded reconnect/auth flow;
-        // namespace disconnect would leave an otherwise healthy client inactive.
-        socket.conn.close();
-        return;
-      }
-      if (socket.connected && socket.rooms.has(room)) socket.emit(event, data);
+      const expired = new Promise(resolve => {
+        timeout = setTimeout(() => {
+          active = false;
+          socket.conn.close();
+          resolve();
+        }, 1500);
+        timeout.unref?.();
+      });
+      const check = async () => {
+        const userId = socket.data.user?.id;
+        // Scope first; the final credential/session read must follow its awaits.
+        const denied = await subscriptionCore.currentAccountScopeError(userId);
+        if (!active) return;
+        const token = socket.handshake.auth?.token;
+        const current = denied ? null : await validateAccessToken(token);
+        if (!active) return;
+        const claims = verifyToken(token); // Expiry can cross a DB/network await.
+        if (Date.now() >= deadline || !current?.ok || !claims || current.user.id !== userId ||
+            current.sessionId !== socket.data.sessionId ||
+            !['worker','manager'].includes(current.user.role) ||
+            current.user.workspace_id !== workspaceId) {
+          // Transport close preserves the client's bounded reconnect/auth flow;
+          // namespace disconnect would leave an otherwise healthy client inactive.
+          socket.conn.close();
+          return;
+        }
+        if (socket.connected && socket.rooms.has(room)) socket.emit(event, data);
+      };
+      await Promise.race([check(), expired]);
     } catch {
       socket.conn.close(); // Authority unavailable: never publish cached data.
+    } finally {
+      active = false; // A timed-out query can settle later, but cannot publish.
+      clearTimeout(timeout);
     }
   }));
 }
