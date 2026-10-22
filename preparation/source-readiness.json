@@ -34,7 +34,7 @@
     "src/timers.js": "570a1b86893a19c91cf3ecaa1bb767e806ccaf68b3d6f699deab20d8a7d85320",
     "src/webAuth.js": "57848aaf2ec36b1f123ccbcbd74e5bd4e278c3db6ce861bffa8a4220eeee2ee2"
   },
-  "sourceManifestSha256": "4995e16a2f5ad507650ec19328473828aa75a508bc337207ac9da7caead40ae1",
+  "sourceManifestSha256": "a77f0b8b311c38c4226595555ce30ecfc16cb245d186437c5d48a488666d5ef1",
   "gateStatus": "SOURCE_VERIFIED_RENDER_INTEGRATION_SEPARATE",
   "runtimeStatus": "READY_FOR_GITHUB_HOSTED_EXECUTION_NOT_RUN",
   "provenance": "current-source-provenance.json",
@@ -44,5 +44,6 @@
     "isolated": "scripts/ci/assert-prepared-source.mjs",
     "renderIntegrationOnly": "scripts/ci/assert-render-deployment.mjs"
   },
-  "manifestByteSource": "git blob at reviewed revision; exact hashes, no runtime line-ending normalization"
+  "manifestByteSource": "git blob at reviewed revision; exact hashes, no runtime line-ending normalization",
+  "testFollowupBase": "b8bb46700efd4f6fa066523ce68bb75e4e9f46c3"
 }

@@ -83,6 +83,16 @@ test('shared PG: scopes, superadmin, UUID ownership and personal revision isolat
   assert.equal(changed.timer.is_pay,true);assert.equal(changed.timer.sync_revision,0);
   assert.equal(changed.timer.user_id,ids.worker);assert.equal(changed.timer.workspace_id,ids.company);
 });
+test('followup PG18 shared: same-workspace actor cannot replay another actor mutation; state/clock stay unchanged',options,async t=>{
+  const{admin}=await setup(t),first=create();await rpc(admin,first);
+  await assert.rejects(()=>rpc(admin,first,ids.manager),/SHARED_FORBIDDEN/);
+  const start=command('start',{expectedRevision:'1'});await rpc(admin,start);
+  const before=(await admin.query('SELECT to_jsonb(t) AS row FROM timers t WHERE id=$1',[ids.shared])).rows;
+  await assert.rejects(()=>rpc(admin,start,ids.manager),/SHARED_CONFLICT/);
+  assert.deepEqual((await admin.query('SELECT to_jsonb(t) AS row FROM timers t WHERE id=$1',[ids.shared])).rows,before);
+  assert.equal((await rpc(admin,start)).timer.shared_revision,'2');
+});
+
 test('shared PG: legacy RPC and direct INSERT cannot bypass command authority',options,async t=>{
   const{admin}=await setup(t);await rpc(admin,create());
   await assert.rejects(()=>admin.query("SELECT public.keeptimer_change_timer($1,$2,'{\"status\":\"paused\",\"accumulated_ms\":0}'::jsonb,false)",[ids.worker,ids.shared]),/SHARED_PROTOCOL_REQUIRED/);

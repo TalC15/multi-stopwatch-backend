@@ -107,6 +107,18 @@
       "sha256": "dcb296942d784935f75c2c7b6399295fdbd4132a682ce783f6c4d7ed8c20644f"
     },
     {
+      "file": "test/security-followup-input-http.test.js",
+      "sha256": "606591ea4969bd3c09520fb50b80ccb2694a5dae65ac5d05488716ba4c7d594f"
+    },
+    {
+      "file": "test/security-followup-pg18.test.js",
+      "sha256": "ca237042036a8ed6eaf8fa21793cadaf6fb300957cba5535b4a730e0ee0827da"
+    },
+    {
+      "file": "test/security-followup-sockets.test.js",
+      "sha256": "55421f8c74d203dc827aab3b931ca35ee8246d97e1a0881c9f845ff5c92ef19e"
+    },
+    {
       "file": "test/security-preparation-fresh-acl-pg18.test.js",
       "sha256": "c8f9a25b74a320940ea18ac3dd91734c97d7fec9b8b752361935cc866196ceb1"
     },
@@ -124,7 +136,7 @@
     },
     {
       "file": "test/shared-concurrency.test.js",
-      "sha256": "b6690b2b4f00c5ea165f13d754cfb1d2348fd9a6d3fc9f85ce7a201c07944906"
+      "sha256": "2e13e5c6c7a49c139f3184b271c4db830f2c85ef50f26f34ab39501530f97dfb"
     },
     {
       "file": "test/shared-http.test.js",
@@ -196,13 +208,25 @@
     },
     {
       "file": "test/web-auth.test.js",
-      "sha256": "40c19dd285222774979bfcc74e97ad83ee4ec69ae75c8eafcd49276bf9dd4ea9"
+      "sha256": "8024527a3a874f48b5d8b3d2a659a82a8ff1f82561d77d3784166cf0eff94cb4"
     }
   ],
   "supportFiles": [
     {
       "file": "test/support/database.js",
       "sha256": "66735d80e4ce768208355c6deaff55a49630a4073b4a8996dd264904495589fd"
+    },
+    {
+      "file": "test/support/followupAuthInstance.js",
+      "sha256": "d711d7cdee1322fc0429fb83fe84e2e1b77ea6000e084926de3fad2a59342f44"
+    },
+    {
+      "file": "test/support/followupProtectedSurface.js",
+      "sha256": "cd50609b7f0544ee484ff569dcc3978c79d607fe737fd1d43198c9267963daf4"
+    },
+    {
+      "file": "test/support/followupRouteCoverage.js",
+      "sha256": "8bd6ceb0a0c599dbd37d8087b73f5b7d0e0060a4c2a5abc46e8d3e1f13e1ca8f"
     },
     {
       "file": "test/support/mfaDevice.js",

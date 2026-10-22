@@ -1,3 +1,4 @@
+import {protectedSurface} from './support/followupProtectedSurface.js';
 import { legacySubscriptionResponse } from './support/subscriptionHttp.js';
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -204,6 +205,49 @@ test("web/native auth HTTP, proxy, session and Socket.IO contract", { timeout: 1
     assert.ok(response.status === 400 || packet.split("\x1e").some(part => part === "1" || part.startsWith("41")), packet);
   };
 
+  await t.test('followup surface: every protected effective HTTP route denies anonymous/forged credentials without writes',async()=>{
+    const before=structuredClone([...sessions]);
+    for(const [method,path] of protectedSurface)for(const access of [null,'forged.token.value']){
+      const actual=path.replace(/:[A-Za-z]+/g,()=>randomUUID());
+      const response=await originalFetch(base+actual,{method,headers:{...csrfHeaders,...(access?{Authorization:'Bearer '+access}:{})},...(method==='GET'?{}:{body:'{}'})});
+      assert.equal(response.status,401,method+' '+path);
+    }
+    assert.deepEqual([...sessions],before);assert.equal(writes.length,0);
+  });
+  await t.test('followup JWT: unsigned, asymmetric and alternate-HMAC wrong-key tokens never authorize HTTP/socket/refresh', async () => {
+    const session=makeSession(),claims={id:users.get('worker').id,sessionId:session.id,type:'access'};
+    const {generateKeyPairSync}=await import('node:crypto');
+    const {privateKey}=generateKeyPairSync('rsa',{modulusLength:2048});
+    const tokens=[jwt.sign(claims,'',{algorithm:'none'}),jwt.sign(claims,'wrong-fixture-key',{algorithm:'HS512'}),jwt.sign(claims,privateKey,{algorithm:'RS256'})];
+    const before=structuredClone([...sessions]);
+    for(const token of tokens){
+      assert.equal(auth.verifyToken(token),null);
+      assert.equal((await bearerRequest('/account/security',{...session,access:token},'GET')).status,401);
+      assert.match((await connectSocket(token)).packet,/^44/);
+      const refresh=await request('/auth/refresh',{sessionId:session.id},{Cookie:cookie(token)});assert.equal(refresh.status,401);
+    }
+    assert.deepEqual([...sessions],before);assert.equal(writes.length,0);
+    // Correct-key HMAC-family verification is the existing JWT contract; no
+    // unsupported HS256-only restriction is manufactured by this test.
+    assert.equal(auth.verifyToken(jwt.sign(claims,process.env.JWT_SECRET,{algorithm:'HS512'})).id,claims.id);
+  });
+  await t.test('followup refresh: simultaneous web/native requests preserve one session/hash and do not rotate or duplicate', async () => {
+    const session=makeSession(),before=structuredClone(sessions.get(session.id)),count=sessions.size;
+    const replies=await Promise.all([sessionRequest('/auth/refresh',session),nativeSession('refresh',session)]);
+    for(const r of replies){assert.equal(r.status,200);const b=await r.json();assert.equal(b.sessionId,session.id);assert.equal(b.refreshToken,undefined);assert.equal(jwt.verify(b.accessToken,process.env.JWT_SECRET).sessionId,session.id);assert.equal(r.headers.get('set-cookie'),null);}
+    assert.equal(sessions.size,count);assert.equal(sessions.get(session.id).refresh_token_hash,before.refresh_token_hash);assert.equal(sessions.get(session.id).revoked_at,null);
+  });
+  await t.test('followup Engine.IO: malformed namespace and oversized polling payload close only offending connections', async () => {
+    for(const packet of ['4not-a-socketio-frame','42[','40{"token":']){
+      const open=await originalFetch(base+'/socket.io/?EIO=4&transport=polling');const sid=JSON.parse((await open.text()).slice(1)).sid;engines.add(sid);
+      const r=await originalFetch(base+'/socket.io/?EIO=4&transport=polling&sid='+sid,{method:'POST',body:packet});assert.ok([200,400].includes(r.status));
+      const next=await originalFetch(base+'/socket.io/?EIO=4&transport=polling&sid='+sid,{signal:AbortSignal.timeout(2000)});const text=await next.text();assert.ok(next.status===400||text.includes('1'));
+      assert.equal((await originalFetch(base+'/health')).status,200);
+    }
+    const open=await originalFetch(base+'/socket.io/?EIO=4&transport=polling');const sid=JSON.parse((await open.text()).slice(1)).sid;engines.add(sid);
+    const over=await originalFetch(base+'/socket.io/?EIO=4&transport=polling&sid='+sid,{method:'POST',body:'4'+'x'.repeat(1_000_001)});assert.equal(over.status,413);
+    assert.match((await connectSocket(makeSession().access)).packet,/^40/);assert.equal(writes.length,0);
+  });
   await t.test("login returns access and public session identity, never refresh JSON", async () => {
     const response = await login();
     assert.equal(response.status, 200);
