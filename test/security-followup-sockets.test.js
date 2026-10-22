@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {once} from 'node:events';
 import {randomUUID} from 'node:crypto';
 import jwt from 'jsonwebtoken';
+import {runInNewContext} from 'node:vm';
 import {database,user,resolve} from './support/subscriptionPhase2.js';
 
 test('followup real sockets: hostile rooms/events, expired/revoked sessions, bounded frames and canonical recipient isolation', {timeout:45000},async t=>{
@@ -93,5 +94,21 @@ test('followup real sockets: hostile rooms/events, expired/revoked sessions, bou
   finally{scopeFailure=null;}
   // A fresh handshake after recovery uses the live same-account session.
   const recovered=await connect(actors.guarded);await publish(actors.peer,'AFTER-AUTHORITY-RECOVERY');assert.ok((await read(recovered,'AFTER-AUTHORITY-RECOVERY')).names.includes('AFTER-AUTHORITY-RECOVERY'));
+ });
+ await t.test('followup actual client: expired connection automatically reconnects with fresh authenticated handshake and canonical events',async()=>{
+  // Use the actual client bundle served by this Socket.IO server, not a stub
+  // and not a new dependency/CDN. Node 22 supplies the browser WebSocket API.
+  const bundle=await original(base+'/socket.io/socket.io.js');assert.equal(bundle.status,200);
+  const context={WebSocket,URL,setTimeout,clearTimeout,setInterval,clearInterval,console};runInNewContext(await bundle.text(),context);
+  assert.equal(typeof context.io,'function');let attempts=0;const reasons=[],seen=[],expiry=Math.floor(Date.now()/1000)+1;
+  const short=jwt.sign({id:actors.guarded.id,sessionId:actors.guarded.session,type:'access',exp:expiry},process.env.JWT_SECRET);
+  const client=context.io(base,{autoConnect:false,transports:['websocket'],reconnection:true,reconnectionDelay:20,reconnectionDelayMax:50,randomizationFactor:0,auth:callback=>callback({token:attempts++===0?short:actors.guarded.token})});
+  t.after(()=>client.disconnect());client.on('disconnect',reason=>reasons.push({reason,active:client.active}));client.on('timer-event',data=>seen.push(data.data.timer.name));
+  const bounded=p=>Promise.race([p,new Promise((_,reject)=>{const timer=setTimeout(()=>reject(Error('Automatic client recovery timed out')),4000);timer.unref();})]);
+  const first=once(client,'connect');client.connect();await bounded(first);
+  await new Promise(r=>setTimeout(r,Math.max(0,expiry*1000-Date.now()+20)));
+  const reconnected=once(client,'connect');await publish(actors.peer,'CLIENT-EXPIRED');await bounded(reconnected);
+  assert.ok(attempts>=2);assert.equal(reasons[0].active,true);assert.notEqual(reasons[0].reason,'io server disconnect');assert.ok(!seen.includes('CLIENT-EXPIRED'));
+  const received=new Promise(resolve=>client.on('timer-event',data=>{if(data.data.timer.name==='CLIENT-RECOVERED')resolve();}));await publish(actors.peer,'CLIENT-RECOVERED');await bounded(received);assert.ok(seen.includes('CLIENT-RECOVERED'));
  });
 });

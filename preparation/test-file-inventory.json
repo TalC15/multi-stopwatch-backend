@@ -120,7 +120,7 @@
     },
     {
       "file": "test/security-followup-sockets.test.js",
-      "sha256": "5b74563bb0dd511dd48897b83f8e12f202a5be3151a9cba90b5a314cd6a9edcb"
+      "sha256": "d31b0ceff92881b8355f290532d2d530813e00fa2ecd66cbc47ec4491ba69492"
     },
     {
       "file": "test/security-preparation-fresh-acl-pg18.test.js",
